@@ -2,7 +2,7 @@
  * VoxMetrics – app.js
  * ───────────────────────────────────────────────────────────
  * Inventory loads from FastAPI with local demo data as a fallback.
- * Text and audio commands update the current page's inventory in memory.
+ * Typed commands use Groq. Voice demos simulate commands locally.
  * ───────────────────────────────────────────────────────────
  */
 
@@ -49,36 +49,42 @@ async function fetchInventory() {
     });
     if (!response.ok) return inventory;
 
-    const rows = await response.json();
-    inventory = rows.map(({ item_name, quantity, unit, price, units_sold }) => ({
-      item: item_name,
-      stock: quantity,
-      unit,
-      price,
-      units_sold,
-    }));
+    inventory = inventoryRows(await response.json());
   } catch {
     // Keep the local inventory when the API is unavailable.
   }
   return inventory;
 }
 
-/**
- * sendTextCommand(text)
- * Parses a text command and returns a structured response.
- * REAL: return fetch('/api/command', { method:'POST', body: JSON.stringify({text}), ... }).then(r=>r.json())
- *
- * @param {string} text
- * @returns {Promise<{heard:string, reply:string, type:'success'|'warning'|'danger', item?:string, qty?:number}>}
- */
+function inventoryRows(rows) {
+  return rows.map(({item_name, quantity, unit, price, units_sold}) => ({
+    item: item_name, stock: quantity, unit, price, units_sold,
+  }));
+}
+
 async function sendTextCommand(text) {
-  await delay(300);
-  return parseMockCommand(text);
+  if (location.protocol === "file:") return parseMockCommand(text);
+  try {
+    const response = await fetch("/api/process-command", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({transcript: text}),
+    });
+    const result = await response.json();
+    if (Array.isArray(result.inventory)) inventory = inventoryRows(result.inventory);
+    let type = "success";
+    if (!response.ok || result.intent === "NOISE_ERROR") type = "danger";
+    else if (result.intent === "INCOMPLETE_INPUT") type = "warning";
+    return {heard: text, reply: result.reply_local || "Could not process this command.",
+            type, chartData: result.chart_data};
+  } catch {
+    return {heard: text, reply: "Could not reach the command service. Refresh to check the latest inventory.", type: "danger"};
+  }
 }
 
 /**
  * sendAudioBlob(blob)
- * Transcribes audio (mocked) then delegates to sendTextCommand.
+ * Simulates a voice command locally.
  * REAL: POST multipart/form-data with the audio blob to /api/audio
  *
  * @param {Blob} blob
@@ -94,7 +100,7 @@ async function sendAudioBlob(blob) {
     "asdfghj noise test",
   ];
   const mockTranscript = demos[Math.floor(Math.random() * demos.length)];
-  const result = await sendTextCommand(mockTranscript);
+  const result = parseMockCommand(mockTranscript);
   return { ...result, heard: mockTranscript + " (voice)" };
 }
 
@@ -209,17 +215,25 @@ function renderTable(data) {
 }
 
 /** Render/update Chart.js bar chart */
-function renderChart(data) {
+function renderChart(data, chartData) {
+  const analytics = Array.isArray(chartData);
+  document.querySelector(".chart-card .card-title").textContent = analytics ? "Inventory Analytics" : "Item-wise Profit";
+  document.querySelector(".chart-card .card-hint").textContent = analytics ? "" : "price × units sold";
   if (typeof Chart === "undefined") return;
 
-  const labels  = data.map(r => capitalise(r.item));
-  const profits = data.map(r => r.price * r.units_sold);
+  const labels = analytics ? chartData.map(r => r.label) : data.map(r => capitalise(r.item));
+  const values = analytics ? chartData.map(r => r.value) : data.map(r => r.price * r.units_sold);
+  const series = analytics ? "Value" : "Profit (₹)";
+  const format = v => (analytics ? "" : "₹") + v.toLocaleString("en-IN");
 
   const ctx = document.getElementById("profitChart").getContext("2d");
 
   if (profitChart) {
     profitChart.data.labels             = labels;
-    profitChart.data.datasets[0].data   = profits;
+    profitChart.data.datasets[0].data   = values;
+    profitChart.data.datasets[0].label = series;
+    profitChart.options.scales.y.ticks.callback = format;
+    profitChart.options.plugins.tooltip.callbacks.label = ctx => format(ctx.parsed.y);
     profitChart.update("active");
     return;
   }
@@ -229,8 +243,8 @@ function renderChart(data) {
     data: {
       labels,
       datasets: [{
-        label: "Profit (₹)",
-        data: profits,
+        label: series,
+        data: values,
         backgroundColor: "#16A34A",
         borderRadius: 5,
         borderSkipped: false,
@@ -244,7 +258,7 @@ function renderChart(data) {
         legend: { display: false },
         tooltip: {
           callbacks: {
-            label: ctx => " ₹" + ctx.parsed.y.toLocaleString("en-IN"),
+            label: ctx => format(ctx.parsed.y),
           },
         },
       },
@@ -258,7 +272,7 @@ function renderChart(data) {
           ticks: {
             font: { size: 11 },
             color: "#64748B",
-            callback: v => "₹" + v.toLocaleString("en-IN"),
+            callback: format,
           },
           beginAtZero: true,
         },
@@ -409,7 +423,7 @@ function wireEvents() {
     showResponse(res);
 
     renderTable(inventory);
-    renderChart(inventory);
+    renderChart(inventory, res.chartData);
 
     setStatus("Ready", "ready");
   }
@@ -428,7 +442,7 @@ function wireEvents() {
       showResponse(res);
 
       renderTable(inventory);
-      renderChart(inventory);
+      renderChart(inventory, res.chartData);
 
       document.getElementById("textInput").value = "";
       setStatus("Ready", "ready");
