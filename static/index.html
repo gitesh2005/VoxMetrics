@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VoxMetrics – Kirana Voice Assistant</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+  <!-- ═══════════════════════════════════════════
+       TOP BAR
+  ═══════════════════════════════════════════ -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <div class="logo-mark">VM</div>
+      <div class="topbar-titles">
+        <span class="topbar-brand">VoxMetrics</span>
+        <span class="topbar-sub">Kirana Voice Assistant</span>
+      </div>
+    </div>
+    <div class="status-badge" id="statusBadge">
+      <span class="status-dot"></span>
+      <span class="status-label">Ready</span>
+    </div>
+  </header>
+
+  <!-- ═══════════════════════════════════════════
+       MAIN LAYOUT
+  ═══════════════════════════════════════════ -->
+  <main class="main-wrap">
+
+    <!-- ─── VOICE CONTROL CARD ─────────────────── -->
+    <section class="card voice-card">
+      <div class="card-header">
+        <h2 class="card-title">Voice Control</h2>
+        <span class="card-hint">Speak or type a command below</span>
+      </div>
+
+      <!-- Mic Button -->
+      <div class="mic-wrap">
+        <button class="mic-btn" id="micBtn" title="Tap to Speak" aria-label="Tap to Speak">
+          <svg class="mic-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="9" y="2" width="6" height="12" rx="3" fill="currentColor"/>
+            <path d="M5 10a7 7 0 0 0 14 0" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <line x1="12" y1="17" x2="12" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <line x1="8" y1="21" x2="16" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <p class="mic-label" id="micLabel">Tap to Speak</p>
+      </div>
+
+      <!-- Text Input Row -->
+      <div class="text-row">
+        <input
+          type="text"
+          id="textInput"
+          class="text-input"
+          placeholder="Type a command… e.g. Add 5 kg sugar"
+          autocomplete="off"
+        />
+        <button class="send-btn" id="sendBtn">Send</button>
+      </div>
+
+      <!-- Quick Demo Pills -->
+      <div class="pills-row">
+        <span class="pills-label">Try:</span>
+        <button class="pill" data-cmd="10 packet mattha add karo">10 packet mattha add karo</button>
+        <button class="pill" data-cmd="Innaki highest profit entha item?">Innaki highest profit entha item?</button>
+        <button class="pill" data-cmd="Add sugar">Add sugar</button>
+        <button class="pill pill--noise" data-cmd="asdfghj noise test">asdfghj noise test</button>
+      </div>
+    </section>
+
+    <!-- ─── LIVE RESPONSE BOX ──────────────────── -->
+    <section class="card response-card" id="responseCard">
+      <div class="card-header">
+        <h2 class="card-title">Live Response</h2>
+      </div>
+
+      <div class="response-body" id="responseBody">
+        <p class="response-placeholder">Response will appear here after you speak or type a command.</p>
+      </div>
+    </section>
+
+    <!-- ─── DATA SECTION ───────────────────────── -->
+    <div class="data-row">
+
+      <!-- Inventory Table Card -->
+      <section class="card table-card">
+        <div class="card-header">
+          <h2 class="card-title">Inventory</h2>
+          <span class="card-hint" id="lastUpdated">Loading…</span>
+        </div>
+        <div class="table-wrap">
+          <table class="inv-table" id="invTable">
+            <thead>
+              <tr>
+                <th>Item</th>
+                <th>Stock Qty</th>
+                <th>Price (₹)</th>
+                <th>Units Sold</th>
+              </tr>
+            </thead>
+            <tbody id="invBody">
+              <tr><td colspan="4" class="table-loading">Loading inventory…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Profit Chart Card -->
+      <section class="card chart-card">
+        <div class="card-header">
+          <h2 class="card-title">Item-wise Profit</h2>
+          <span class="card-hint">price × units sold</span>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="profitChart"></canvas>
+        </div>
+      </section>
+
+    </div><!-- /data-row -->
+
+  </main>
+
+  <footer class="footer">
+    <span>VoxMetrics &copy; 2026 &mdash; Multilingual Voice Copilot for Kirana Stores</span>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
