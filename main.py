@@ -1,13 +1,17 @@
+import base64
+import io
 import json
+import logging
 import math
 import os
 import re
 import sqlite3
+import tempfile
 from contextlib import asynccontextmanager, closing
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI
+from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
@@ -21,6 +25,7 @@ from database import initialize_database, read_inventory
 load_dotenv(Path(__file__).with_name(".env"))
 api_key = os.getenv("GROQ_API_KEY")
 client = Groq(api_key=api_key, timeout=30, max_retries=1) if api_key else None
+logger = logging.getLogger("voxmetrics")
 
 
 class Command(BaseModel):
@@ -113,6 +118,39 @@ def execute_decision(decision):
         return None
 
 
+LANG_MAP = {"hi": "hi", "ta": "ta", "mr": "mr", "bn": "bn", "te": "te", "en": "en"}
+
+
+def generate_tts_base64(text: str, lang: str) -> str:
+    """Generate an MP3 of *text* via gTTS and return its base64 string.
+
+    Falls back through lang → 'hi' → 'en' if the requested language code
+    is rejected, and returns an empty string if TTS fails entirely so that
+    the calling endpoint never crashes.
+    """
+    from gtts import gTTS
+
+    fallback_chain = []
+    mapped = LANG_MAP.get(lang, lang)
+    if mapped:
+        fallback_chain.append(mapped)
+    if "hi" not in fallback_chain:
+        fallback_chain.append("hi")
+    if "en" not in fallback_chain:
+        fallback_chain.append("en")
+
+    for try_lang in fallback_chain:
+        try:
+            tts = gTTS(text=text, lang=try_lang)
+            buf = io.BytesIO()
+            tts.write_to_fp(buf)
+            buf.seek(0)
+            return base64.b64encode(buf.read()).decode("ascii")
+        except Exception:
+            logger.warning("gTTS failed for lang=%s, trying next fallback", try_lang)
+    return ""
+
+
 def run_ai_pipeline(transcript: str):
     if not client:
         raise RuntimeError("Configure GROQ_API_KEY to process commands.")
@@ -153,7 +191,9 @@ def get_inventory():
 @app.post("/api/process-command")
 def process_command(command: Command):
     try:
-        return run_ai_pipeline(command.transcript)
+        result = run_ai_pipeline(command.transcript)
+        audio_b64 = generate_tts_base64(result["reply_local"], result["detected_lang"])
+        return {**result, "audio_base64": audio_b64}
     except RuntimeError as exc:
         status, message = 503, str(exc)
     except (GroqError, ValidationError):
@@ -162,8 +202,75 @@ def process_command(command: Command):
         status, message = 400, "Could not apply the command. Check the item, quantity and available stock."
     return JSONResponse(status_code=status, content=dict(
         intent="NOISE_ERROR", detected_lang="en", reply_local=message,
-        chart_data=None, inventory=read_inventory(),
+        chart_data=None, inventory=read_inventory(), audio_base64="",
     ))
+
+
+@app.post("/api/voice-command")
+async def voice_command(audio: UploadFile = File(...)):
+    """Accept an uploaded audio file, transcribe it with Groq Whisper,
+    run the AI pipeline on the transcript, generate TTS, and return
+    the full response payload."""
+    if not client:
+        return JSONResponse(status_code=503, content=dict(
+            transcript="", intent="NOISE_ERROR", detected_lang="en",
+            reply_local="Configure GROQ_API_KEY to process voice commands.",
+            chart_data=None, inventory=read_inventory(), audio_base64="",
+        ))
+    try:
+        audio_bytes = await audio.read()
+        filename = audio.filename or "recording.wav"
+        content_type = audio.content_type or ("audio/wav" if filename.endswith(".wav") else "audio/webm")
+
+        transcription = client.audio.transcriptions.create(
+            model="whisper-large-v3-turbo",
+            file=(filename, audio_bytes, content_type),
+            temperature=0.0,
+            prompt=(
+                "Indian Kirana store inventory voice command in Hinglish, Hindi, "
+                "Tamil, Marathi, Bengali, or English (use Latin/Roman or Devanagari script, never Urdu). "
+                "Common words: 10 packet mattha add karo, 5 kilo cheeni, 2 liter doodh bik gaya, "
+                "chawal, dal, tel, namak, chai patti, dahi, thayir, doi, highest profit."
+            ),
+        )
+
+        transcript = transcription.text.strip()
+        clean_text = re.sub(r"[^\w\s]", "", transcript.lower()).strip()
+        silence_hallucinations = {
+            "", "you", "thank you", "thank you so much", "thank you very much",
+            "thanks", "thanks for watching", "thank you for watching",
+            "bye", "bye bye", "goodbye", "subscribe", "please subscribe",
+        }
+
+        if not transcript or clean_text in silence_hallucinations:
+            msg = "Could not hear any speech clearly. Please speak closer to the mic and try again."
+            return dict(
+                transcript=transcript if transcript else "",
+                intent="NOISE_ERROR", detected_lang="en",
+                reply_local=msg, chart_data=None, inventory=read_inventory(),
+                audio_base64=generate_tts_base64(msg, "en"),
+            )
+
+        result = run_ai_pipeline(transcript)
+        audio_b64 = generate_tts_base64(result["reply_local"], result["detected_lang"])
+        return {**result, "transcript": transcript, "audio_base64": audio_b64}
+
+    except (GroqError, ValidationError) as exc:
+        logger.exception("Voice pipeline error")
+        msg = "Could not interpret the voice command. Please try again."
+        return JSONResponse(status_code=502, content=dict(
+            transcript="", intent="NOISE_ERROR", detected_lang="en",
+            reply_local=msg, chart_data=None, inventory=read_inventory(),
+            audio_base64="",
+        ))
+    except (ValueError, sqlite3.DatabaseError) as exc:
+        logger.exception("Voice pipeline DB error")
+        msg = "Could not apply the command. Check the item, quantity and available stock."
+        return JSONResponse(status_code=400, content=dict(
+            transcript="", intent="NOISE_ERROR", detected_lang="en",
+            reply_local=msg, chart_data=None, inventory=read_inventory(),
+            audio_base64="",
+        ))
 
 
 app.mount("/", StaticFiles(directory=Path(__file__).with_name("static"), html=True))

@@ -1,8 +1,10 @@
 /**
  * VoxMetrics – app.js
  * ───────────────────────────────────────────────────────────
- * Inventory loads from FastAPI with local demo data as a fallback.
- * Typed commands use Groq. Voice demos simulate commands locally.
+ * Full multilingual voice loop with TTS audio playback.
+ * Text commands   → POST /api/process-command
+ * Voice commands  → POST /api/voice-command (multipart)
+ * Falls back to local mock parsing when opened as file://.
  * ───────────────────────────────────────────────────────────
  */
 
@@ -27,10 +29,17 @@ let inventory = [
 /* Chart instance (Chart.js) */
 let profitChart = null;
 
-/* Media recorder state */
-let mediaRecorder = null;
-let audioChunks   = [];
-let isRecording   = false;
+/* Audio capture & recording state */
+let audioContext     = null;
+let micStream        = null;
+let scriptProcessor  = null;
+let analyserNode     = null;
+let pcmChunks        = [];
+let isRecording      = false;
+let animFrameId      = null;
+
+/* Last TTS audio for replay */
+let lastAudioBase64 = "";
 
 /* ══════════════════════════════════════════════════════════
    PUBLIC API FUNCTIONS  (swap these with real endpoints)
@@ -76,7 +85,7 @@ async function sendTextCommand(text) {
     if (!response.ok || result.intent === "NOISE_ERROR") type = "danger";
     else if (result.intent === "INCOMPLETE_INPUT") type = "warning";
     return {heard: text, reply: result.reply_local || "Could not process this command.",
-            type, chartData: result.chart_data};
+            type, chartData: result.chart_data, audioBase64: result.audio_base64 || ""};
   } catch {
     return {heard: text, reply: "Could not reach the command service. Refresh to check the latest inventory.", type: "danger"};
   }
@@ -84,24 +93,53 @@ async function sendTextCommand(text) {
 
 /**
  * sendAudioBlob(blob)
- * Simulates a voice command locally.
- * REAL: POST multipart/form-data with the audio blob to /api/audio
- *
- * @param {Blob} blob
- * @returns {Promise<{heard:string, reply:string, type:'success'|'warning'|'danger'}>}
+ * Sends recorded audio to POST /api/voice-command.
+ * Falls back to local mock when opened as file://.
  */
 async function sendAudioBlob(blob) {
-  await delay(600); // simulate transcription time
-  // In mock mode: randomly pick a demo command for demo purposes
-  const demos = [
-    "10 packet mattha add karo",
-    "Innaki highest profit entha item?",
-    "Add sugar",
-    "asdfghj noise test",
-  ];
-  const mockTranscript = demos[Math.floor(Math.random() * demos.length)];
-  const result = parseMockCommand(mockTranscript);
-  return { ...result, heard: mockTranscript + " (voice)" };
+  if (location.protocol === "file:") {
+    await delay(600);
+    const demos = [
+      "10 packet mattha add karo",
+      "Innaki highest profit entha item?",
+      "Add sugar",
+      "asdfghj noise test",
+    ];
+    const mockTranscript = demos[Math.floor(Math.random() * demos.length)];
+    const result = parseMockCommand(mockTranscript);
+    return { ...result, heard: mockTranscript + " (voice)" };
+  }
+
+  try {
+    const formData = new FormData();
+    const filename = (blob.type && blob.type.includes("wav")) ? "recording.wav" : "recording.wav";
+    formData.append("audio", blob, filename);
+
+    const response = await fetch("/api/voice-command", {
+      method: "POST",
+      body: formData,
+    });
+    const result = await response.json();
+    if (Array.isArray(result.inventory)) inventory = inventoryRows(result.inventory);
+
+    let type = "success";
+    if (!response.ok || result.intent === "NOISE_ERROR") type = "danger";
+    else if (result.intent === "INCOMPLETE_INPUT") type = "warning";
+
+    return {
+      heard: result.transcript || "(voice)",
+      reply: result.reply_local || "Could not process voice command.",
+      type,
+      chartData: result.chart_data,
+      audioBase64: result.audio_base64 || "",
+    };
+  } catch {
+    return {
+      heard: "(voice)",
+      reply: "Could not reach the voice service. Please check your connection.",
+      type: "danger",
+    };
+  }
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -281,12 +319,45 @@ function renderChart(data, chartData) {
   });
 }
 
+/* ══════════════════════════════════════════════════════════
+   AUDIO PLAYBACK
+══════════════════════════════════════════════════════════ */
+
+/**
+ * Play a base64-encoded MP3 audio string.
+ * Returns the Audio element for reference.
+ */
+function playAudioBase64(b64) {
+  if (!b64) return null;
+  try {
+    const audio = new Audio("data:audio/mp3;base64," + b64);
+    audio.play().catch(() => {});
+    return audio;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Display response banners in the Live Response card.
- * @param {{heard:string, reply:string, type:'success'|'warning'|'danger', item?:string}} res
+ * Includes a "Replay Audio" button when TTS audio is available.
+ * @param {{heard:string, reply:string, type:'success'|'warning'|'danger', item?:string, audioBase64?:string}} res
  */
 function showResponse(res) {
   const body = document.getElementById("responseBody");
+  const hasAudio = !!(res.audioBase64);
+
+  // Store for replay
+  if (hasAudio) lastAudioBase64 = res.audioBase64;
+
+  const replayBtn = hasAudio
+    ? `<button class="replay-btn" id="replayBtn" title="Replay Audio">
+         <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+           <path d="M8 5v14l11-7z" fill="currentColor"/>
+         </svg>
+         Replay Audio
+       </button>`
+    : "";
 
   const heardHtml = `
     <div class="alert alert--${res.type}">
@@ -295,10 +366,24 @@ function showResponse(res) {
 
   const replyHtml = `
     <div class="alert alert--${res.type}">
-      <strong>Reply</strong>${escHtml(res.reply)}
+      <div class="reply-row">
+        <div class="reply-content">
+          <strong>Reply</strong>${escHtml(res.reply)}
+        </div>
+        ${replayBtn}
+      </div>
     </div>`;
 
   body.innerHTML = heardHtml + replyHtml;
+
+  // Wire replay button
+  if (hasAudio) {
+    const btn = document.getElementById("replayBtn");
+    if (btn) btn.addEventListener("click", () => playAudioBase64(lastAudioBase64));
+  }
+
+  // Auto-play TTS audio
+  if (hasAudio) playAudioBase64(res.audioBase64);
 
   // Flash updated row in table if applicable
   if (res.item) {
@@ -341,40 +426,69 @@ function resolveItem(word) {
 }
 
 /* ══════════════════════════════════════════════════════════
-   MICROPHONE / RECORDING
+   MICROPHONE / PCM AUDIO RECORDING & WAV ENCODING
 ══════════════════════════════════════════════════════════ */
 
 async function startRecording() {
   if (isRecording) return;
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    audioChunks  = [];
-    mediaRecorder = new MediaRecorder(stream);
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
 
-    mediaRecorder.ondataavailable = e => {
-      if (e.data.size > 0) audioChunks.push(e.data);
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    audioContext = new AudioCtx();
+    if (audioContext.state === "suspended") {
+      await audioContext.resume();
+    }
+
+    const source = audioContext.createMediaStreamSource(micStream);
+    analyserNode = audioContext.createAnalyser();
+    analyserNode.fftSize = 256;
+    analyserNode.smoothingTimeConstant = 0.3;
+
+    // Capture mono PCM samples with ScriptProcessorNode
+    scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+    pcmChunks = [];
+
+    scriptProcessor.onaudioprocess = e => {
+      if (!isRecording) return;
+      const input = e.inputBuffer.getChannelData(0);
+      pcmChunks.push(new Float32Array(input));
     };
 
-    mediaRecorder.onstop = async () => {
-      const blob = new Blob(audioChunks, { type: "audio/webm" });
-      stream.getTracks().forEach(t => t.stop());
-      setStatus("Processing…", "ready");
-      setMicState(false);
+    source.connect(analyserNode);
+    analyserNode.connect(scriptProcessor);
+    scriptProcessor.connect(audioContext.destination);
 
-      const res = await sendAudioBlob(blob);
-      showResponse(res);
-
-      // Refresh table & chart after potential inventory mutation
-      renderTable(inventory);
-      renderChart(inventory);
-
-      setStatus("Ready", "ready");
-    };
-
-    mediaRecorder.start();
     isRecording = true;
     setMicState(true);
     setStatus("Recording…", "recording");
+
+    // Live volume bar animation
+    const volWrap = document.getElementById("micVolWrap");
+    const volFill = document.getElementById("micVolFill");
+    if (volWrap) volWrap.classList.add("recording");
+
+    const timeData = new Uint8Array(analyserNode.fftSize);
+    function updateVol() {
+      if (!isRecording) return;
+      analyserNode.getByteTimeDomainData(timeData);
+      let sum = 0;
+      for (let i = 0; i < timeData.length; i++) {
+        const val = (timeData[i] - 128) / 128;
+        sum += val * val;
+      }
+      const rms = Math.sqrt(sum / timeData.length);
+      const pct = Math.min(100, Math.round(rms * 280));
+      if (volFill) volFill.style.width = pct + "%";
+      animFrameId = requestAnimationFrame(updateVol);
+    }
+    updateVol();
 
   } catch (err) {
     console.error("Mic error:", err);
@@ -386,10 +500,75 @@ async function startRecording() {
   }
 }
 
-function stopRecording() {
-  if (!isRecording || !mediaRecorder) return;
-  mediaRecorder.stop();
+async function stopRecording() {
+  if (!isRecording) return;
   isRecording = false;
+
+  if (animFrameId) {
+    cancelAnimationFrame(animFrameId);
+    animFrameId = null;
+  }
+
+  const volWrap = document.getElementById("micVolWrap");
+  const volFill = document.getElementById("micVolFill");
+  if (volWrap) volWrap.classList.remove("recording");
+  if (volFill) volFill.style.width = "0%";
+
+  setMicState(false);
+  setStatus("Processing…", "ready");
+
+  // Disconnect audio nodes and close context
+  if (scriptProcessor) {
+    scriptProcessor.disconnect();
+    scriptProcessor = null;
+  }
+  if (analyserNode) {
+    analyserNode.disconnect();
+    analyserNode = null;
+  }
+  if (micStream) {
+    micStream.getTracks().forEach(t => t.stop());
+    micStream = null;
+  }
+
+  const inSampleRate = audioContext ? audioContext.sampleRate : 44100;
+  if (audioContext && audioContext.state !== "closed") {
+    audioContext.close().catch(() => {});
+    audioContext = null;
+  }
+
+  // Peak amplitude check for silence detection
+  let maxAmp = 0;
+  for (const chunk of pcmChunks) {
+    for (let i = 0; i < chunk.length; i++) {
+      const abs = Math.abs(chunk[i]);
+      if (abs > maxAmp) maxAmp = abs;
+    }
+  }
+
+  // If peak amplitude is near zero (silence), show friendly amber warning
+  if (maxAmp < 0.015 || pcmChunks.length === 0) {
+    showResponse({
+      heard: "(silence)",
+      reply: "No voice detected — please check your browser microphone",
+      type: "warning",
+    });
+    setStatus("Ready", "ready");
+    return;
+  }
+
+  // Resample to 16kHz mono and encode WAV Blob
+  const samples16k = resampleTo16kHz(pcmChunks, inSampleRate, 16000);
+  const wavBlob = encodeWav(samples16k, 16000);
+
+  const res = await sendAudioBlob(wavBlob);
+  showResponse(res);
+
+  // Refresh table & chart after potential inventory mutation
+  renderTable(inventory);
+  renderChart(inventory, res.chartData);
+
+  setStatus("Ready", "ready");
 }
 
 function setMicState(recording) {
@@ -397,6 +576,82 @@ function setMicState(recording) {
   const label = document.getElementById("micLabel");
   btn.classList.toggle("recording", recording);
   label.textContent = recording ? "Tap to Stop" : "Tap to Speak";
+}
+
+/**
+ * Resamples Float32Array PCM chunks to 16kHz mono.
+ */
+function resampleTo16kHz(chunks, inSampleRate, targetSampleRate = 16000) {
+  const totalLen = chunks.reduce((acc, c) => acc + c.length, 0);
+  const full = new Float32Array(totalLen);
+  let offset = 0;
+  for (const c of chunks) {
+    full.set(c, offset);
+    offset += c.length;
+  }
+  if (inSampleRate === targetSampleRate) return full;
+
+  const ratio = inSampleRate / targetSampleRate;
+  const newLen = Math.round(full.length / ratio);
+  const result = new Float32Array(newLen);
+  for (let i = 0; i < newLen; i++) {
+    const origIndex = i * ratio;
+    const index1 = Math.floor(origIndex);
+    const index2 = Math.min(index1 + 1, full.length - 1);
+    const frac = origIndex - index1;
+    result[i] = full[index1] * (1 - frac) + full[index2] * frac;
+  }
+  return result;
+}
+
+/**
+ * Encodes Float32Array mono samples into a 16-bit PCM WAV Blob.
+ */
+function encodeWav(samples, sampleRate = 16000) {
+  const buffer = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buffer);
+
+  function writeString(view, offset, string) {
+    for (let i = 0; i < string.length; i++) {
+      view.setUint8(offset + i, string.charCodeAt(i));
+    }
+  }
+
+  /* RIFF identifier */
+  writeString(view, 0, "RIFF");
+  /* file length */
+  view.setUint32(4, 36 + samples.length * 2, true);
+  /* RIFF type */
+  writeString(view, 8, "WAVE");
+  /* format chunk identifier */
+  writeString(view, 12, "fmt ");
+  /* format chunk length */
+  view.setUint32(16, 16, true);
+  /* sample format (1 = PCM) */
+  view.setUint16(20, 1, true);
+  /* channel count (1 = mono) */
+  view.setUint16(22, 1, true);
+  /* sample rate */
+  view.setUint32(24, sampleRate, true);
+  /* byte rate (sample rate * block align) */
+  view.setUint32(28, sampleRate * 2, true);
+  /* block align (channel count * bytes per sample) */
+  view.setUint16(32, 2, true);
+  /* bits per sample */
+  view.setUint16(34, 16, true);
+  /* data chunk identifier */
+  writeString(view, 36, "data");
+  /* data chunk length */
+  view.setUint32(40, samples.length * 2, true);
+
+  /* Write 16-bit PCM samples */
+  let offset = 44;
+  for (let i = 0; i < samples.length; i++, offset += 2) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+
+  return new Blob([buffer], { type: "audio/wav" });
 }
 
 /* ══════════════════════════════════════════════════════════
