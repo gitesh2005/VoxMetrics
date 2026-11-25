@@ -550,7 +550,7 @@ async function stopRecording() {
   if (maxAmp < 0.015 || pcmChunks.length === 0) {
     showResponse({
       heard: "(silence)",
-      reply: "No voice detected — please check your browser microphone",
+      reply: "No voice detected — check your microphone",
       type: "warning",
     });
     setStatus("Ready", "ready");
