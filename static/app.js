@@ -1,16 +1,8 @@
 /**
  * VoxMetrics – app.js
  * ───────────────────────────────────────────────────────────
- * Standalone MOCK mode.
- * All three public functions are designed to be swapped with
- * real FastAPI calls in the next phase:
- *
- *   fetchInventory()         → GET  /api/inventory
- *   sendTextCommand(text)    → POST /api/command  { text }
- *   sendAudioBlob(blob)      → POST /api/audio    (multipart)
- *
- * Nothing else in this file needs to change when you wire up
- * the real backend.
+ * Inventory loads from FastAPI with local demo data as a fallback.
+ * Text and audio commands update the current page's inventory in memory.
  * ───────────────────────────────────────────────────────────
  */
 
@@ -46,13 +38,29 @@ let isRecording   = false;
 
 /**
  * fetchInventory()
- * Returns the current inventory array.
- * REAL: return fetch('/api/inventory').then(r => r.json())
+ * Loads the initial inventory while preserving the UI's local row shape.
  */
 async function fetchInventory() {
-  // Simulate network latency
-  await delay(200);
-  return JSON.parse(JSON.stringify(inventory)); // return deep copy
+  if (location.protocol === "file:") return inventory;
+
+  try {
+    const response = await fetch("/api/inventory", {
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!response.ok) return inventory;
+
+    const rows = await response.json();
+    inventory = rows.map(({ item_name, quantity, unit, price, units_sold }) => ({
+      item: item_name,
+      stock: quantity,
+      unit,
+      price,
+      units_sold,
+    }));
+  } catch {
+    // Keep the local inventory when the API is unavailable.
+  }
+  return inventory;
 }
 
 /**
@@ -113,6 +121,9 @@ function parseMockCommand(text) {
 
   // ── Highest-profit query ──────────────────────────────
   if (/highest profit|profit entha|most profit/.test(lower)) {
+    if (!inventory.length) {
+      return { heard: t, reply: "The inventory is empty.", type: "warning" };
+    }
     const best = inventory.reduce((a, b) =>
       b.price * b.units_sold > a.price * a.units_sold ? b : a
     );
@@ -136,7 +147,8 @@ function parseMockCommand(text) {
     const rawItem = addMatch[2]?.toLowerCase();
     const resolved = resolveItem(rawItem);
 
-    if (!resolved) {
+    const itemRow = inventory.find(row => row.item === resolved);
+    if (!itemRow) {
       return {
         heard: t,
         reply: `Item "${rawItem}" not found in inventory. Please check the item name.`,
@@ -145,8 +157,7 @@ function parseMockCommand(text) {
     }
 
     // Look up the item's unit for context-aware replies
-    const itemRow = inventory.find(r => r.item === resolved);
-    const itemUnit = itemRow?.unit ?? "units";
+    const itemUnit = itemRow.unit;
 
     if (!qty) {
       return {
@@ -158,12 +169,11 @@ function parseMockCommand(text) {
     }
 
     // Mutate mock inventory
-    const idx = inventory.findIndex(r => r.item === resolved);
-    if (idx !== -1) inventory[idx].stock += qty;
+    itemRow.stock += qty;
 
     return {
       heard: t,
-      reply: `Added ${qty} ${itemUnit} of ${capitalise(resolved)}. New stock: ${inventory[idx]?.stock ?? "—"} ${itemUnit}.`,
+      reply: `Added ${qty} ${itemUnit} of ${capitalise(resolved)}. New stock: ${itemRow.stock} ${itemUnit}.`,
       type: "success",
       item: resolved,
       qty,
@@ -186,9 +196,9 @@ function parseMockCommand(text) {
 function renderTable(data) {
   const tbody = document.getElementById("invBody");
   tbody.innerHTML = data.map(row => `
-    <tr id="row-${row.item}">
-      <td>${capitalise(row.item)}</td>
-      <td>${row.stock} ${row.unit}</td>
+    <tr id="row-${escHtml(row.item).replace(/"/g, "&quot;")}">
+      <td>${escHtml(capitalise(row.item))}</td>
+      <td>${row.stock} ${escHtml(row.unit)}</td>
       <td>₹${row.price}</td>
       <td>${row.units_sold}</td>
     </tr>
@@ -200,6 +210,8 @@ function renderTable(data) {
 
 /** Render/update Chart.js bar chart */
 function renderChart(data) {
+  if (typeof Chart === "undefined") return;
+
   const labels  = data.map(r => capitalise(r.item));
   const profits = data.map(r => r.price * r.units_sold);
 
@@ -339,9 +351,8 @@ async function startRecording() {
       showResponse(res);
 
       // Refresh table & chart after potential inventory mutation
-      const data = await fetchInventory();
-      renderTable(data);
-      renderChart(data);
+      renderTable(inventory);
+      renderChart(inventory);
 
       setStatus("Ready", "ready");
     };
@@ -397,9 +408,8 @@ function wireEvents() {
     const res = await sendTextCommand(text);
     showResponse(res);
 
-    const data = await fetchInventory();
-    renderTable(data);
-    renderChart(data);
+    renderTable(inventory);
+    renderChart(inventory);
 
     setStatus("Ready", "ready");
   }
@@ -417,9 +427,8 @@ function wireEvents() {
       const res = await sendTextCommand(cmd);
       showResponse(res);
 
-      const data = await fetchInventory();
-      renderTable(data);
-      renderChart(data);
+      renderTable(inventory);
+      renderChart(inventory);
 
       document.getElementById("textInput").value = "";
       setStatus("Ready", "ready");
@@ -440,10 +449,10 @@ const escHtml = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"
 ══════════════════════════════════════════════════════════ */
 
 async function init() {
-  wireEvents();
   const data = await fetchInventory();
   renderTable(data);
   renderChart(data);
+  wireEvents();
 }
 
 document.addEventListener("DOMContentLoaded", init);
