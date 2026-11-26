@@ -41,6 +41,12 @@ let animFrameId      = null;
 /* Last TTS audio for replay */
 let lastAudioBase64 = "";
 
+/* User recording blob URL for playback */
+let currentUserAudioUrl = null;
+
+/* Single global audio instance to prevent overlapping audio playback */
+let currentAudio = null;
+
 /* ══════════════════════════════════════════════════════════
    PUBLIC API FUNCTIONS  (swap these with real endpoints)
 ══════════════════════════════════════════════════════════ */
@@ -325,12 +331,24 @@ function renderChart(data, chartData) {
 
 /**
  * Play a base64-encoded MP3 audio string.
+ * Stops any previously playing audio track so sounds never overlap.
  * Returns the Audio element for reference.
  */
 function playAudioBase64(b64) {
   if (!b64) return null;
   try {
+    if (currentAudio) {
+      currentAudio.pause();
+      currentAudio.currentTime = 0;
+      currentAudio = null;
+    }
+    const userPlayer = document.getElementById("userAudioPlayer");
+    if (userPlayer && !userPlayer.paused) {
+      userPlayer.pause();
+      userPlayer.currentTime = 0;
+    }
     const audio = new Audio("data:audio/mp3;base64," + b64);
+    currentAudio = audio;
     audio.play().catch(() => {});
     return audio;
   } catch {
@@ -396,6 +414,64 @@ function showResponse(res) {
   }
 }
 
+/**
+ * Display or update the "Hear My Recording" player right under the Live Response box.
+ * @param {Blob} wavBlob
+ */
+function updateUserRecordingAudio(wavBlob) {
+  if (currentUserAudioUrl) {
+    URL.revokeObjectURL(currentUserAudioUrl);
+    currentUserAudioUrl = null;
+  }
+  if (!wavBlob) return;
+
+  currentUserAudioUrl = URL.createObjectURL(wavBlob);
+
+  let wrap = document.getElementById("userAudioWrap");
+  if (!wrap) {
+    const card = document.getElementById("responseCard");
+    if (card) {
+      wrap = document.createElement("div");
+      wrap.id = "userAudioWrap";
+      wrap.className = "user-audio-wrap";
+      card.appendChild(wrap);
+    }
+  }
+
+  if (wrap) {
+    wrap.style.display = "flex";
+    wrap.innerHTML = `
+      <button class="hear-recording-btn" id="hearRecordingBtn" type="button" title="Hear My Recording">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+          <path d="M8 5v14l11-7z" fill="currentColor"/>
+        </svg>
+        Hear My Recording
+      </button>
+      <audio id="userAudioPlayer" controls class="user-audio-player" src="${currentUserAudioUrl}"></audio>
+    `;
+    const btn = document.getElementById("hearRecordingBtn");
+    const audio = document.getElementById("userAudioPlayer");
+    if (btn && audio) {
+      btn.addEventListener("click", () => {
+        if (currentAudio) {
+          currentAudio.pause();
+          currentAudio.currentTime = 0;
+          currentAudio = null;
+        }
+        audio.currentTime = 0;
+        audio.play().catch(() => {});
+      });
+      audio.addEventListener("play", () => {
+        if (currentAudio) {
+          currentAudio.pause();
+          currentAudio.currentTime = 0;
+          currentAudio = null;
+        }
+      });
+    }
+  }
+}
+
 /** Update status badge */
 function setStatus(label, mode /* 'ready' | 'recording' */) {
   const badge = document.getElementById("statusBadge");
@@ -434,8 +510,8 @@ async function startRecording() {
   try {
     micStream = await navigator.mediaDevices.getUserMedia({
       audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
+        echoCancellation: false,
+        noiseSuppression: false,
         autoGainControl: true,
       },
     });
@@ -500,6 +576,29 @@ async function startRecording() {
   }
 }
 
+/**
+ * Enables or disables UI controls (mic, send button, input, pills)
+ * while an API request is in flight to prevent duplicate requests.
+ */
+function setControlsDisabled(disabled) {
+  const micBtn = document.getElementById("micBtn");
+  const sendBtn = document.getElementById("sendBtn");
+  const input = document.getElementById("textInput");
+  const pills = document.querySelectorAll(".pill");
+
+  if (micBtn) {
+    micBtn.disabled = disabled;
+    micBtn.classList.toggle("disabled", disabled);
+  }
+  if (sendBtn) {
+    sendBtn.disabled = disabled;
+  }
+  if (input) {
+    input.disabled = disabled;
+  }
+  pills.forEach(p => { p.disabled = disabled; });
+}
+
 async function stopRecording() {
   if (!isRecording) return;
   isRecording = false;
@@ -516,6 +615,7 @@ async function stopRecording() {
 
   setMicState(false);
   setStatus("Processing…", "ready");
+  setControlsDisabled(true);
 
   // Disconnect audio nodes and close context
   if (scriptProcessor) {
@@ -537,38 +637,51 @@ async function stopRecording() {
     audioContext = null;
   }
 
-  // Peak amplitude check for silence detection
-  let maxAmp = 0;
-  for (const chunk of pcmChunks) {
-    for (let i = 0; i < chunk.length; i++) {
-      const abs = Math.abs(chunk[i]);
-      if (abs > maxAmp) maxAmp = abs;
+  try {
+    // Peak amplitude check for silence detection
+    let maxAmp = 0;
+    for (const chunk of pcmChunks) {
+      for (let i = 0; i < chunk.length; i++) {
+        const abs = Math.abs(chunk[i]);
+        if (abs > maxAmp) maxAmp = abs;
+      }
     }
-  }
 
-  // If peak amplitude is near zero (silence), show friendly amber warning
-  if (maxAmp < 0.015 || pcmChunks.length === 0) {
-    showResponse({
-      heard: "(silence)",
-      reply: "No voice detected — check your microphone",
-      type: "warning",
-    });
+    // If peak amplitude is near zero (silence), show friendly amber warning
+    if (maxAmp < 0.015 || pcmChunks.length === 0) {
+      showResponse({
+        heard: "(silence)",
+        reply: "No voice detected — check your microphone",
+        type: "warning",
+      });
+      return;
+    }
+
+    // Flatten Float32Array PCM chunks without resampling distortion
+    const totalLen = pcmChunks.reduce((acc, c) => acc + c.length, 0);
+    const flatSamples = new Float32Array(totalLen);
+    let offset = 0;
+    for (const c of pcmChunks) {
+      flatSamples.set(c, offset);
+      offset += c.length;
+    }
+
+    // Encode WAV Blob with actual audioContext.sampleRate (e.g. 44100 or 48000 Hz)
+    const wavBlob = encodeWav(flatSamples, inSampleRate);
+
+    // Display "Hear My Recording" audio player right under Live Response box
+    updateUserRecordingAudio(wavBlob);
+
+    const res = await sendAudioBlob(wavBlob);
+    showResponse(res);
+
+    // Refresh table & chart after potential inventory mutation
+    renderTable(inventory);
+    renderChart(inventory, res.chartData);
+  } finally {
+    setControlsDisabled(false);
     setStatus("Ready", "ready");
-    return;
   }
-
-  // Resample to 16kHz mono and encode WAV Blob
-  const samples16k = resampleTo16kHz(pcmChunks, inSampleRate, 16000);
-  const wavBlob = encodeWav(samples16k, 16000);
-
-  const res = await sendAudioBlob(wavBlob);
-  showResponse(res);
-
-  // Refresh table & chart after potential inventory mutation
-  renderTable(inventory);
-  renderChart(inventory, res.chartData);
-
-  setStatus("Ready", "ready");
 }
 
 function setMicState(recording) {
@@ -607,7 +720,7 @@ function resampleTo16kHz(chunks, inSampleRate, targetSampleRate = 16000) {
 /**
  * Encodes Float32Array mono samples into a 16-bit PCM WAV Blob.
  */
-function encodeWav(samples, sampleRate = 16000) {
+function encodeWav(samples, sampleRate = 44100) {
   const buffer = new ArrayBuffer(44 + samples.length * 2);
   const view = new DataView(buffer);
 
@@ -661,6 +774,8 @@ function encodeWav(samples, sampleRate = 16000) {
 function wireEvents() {
   // Mic toggle
   document.getElementById("micBtn").addEventListener("click", () => {
+    const micBtn = document.getElementById("micBtn");
+    if (micBtn.disabled) return;
     isRecording ? stopRecording() : startRecording();
   });
 
@@ -669,18 +784,23 @@ function wireEvents() {
   const sendBtn = document.getElementById("sendBtn");
 
   async function handleSend() {
+    if (sendBtn.disabled) return;
     const text = input.value.trim();
     if (!text) return;
     input.value = "";
     setStatus("Thinking…", "ready");
+    setControlsDisabled(true);
 
-    const res = await sendTextCommand(text);
-    showResponse(res);
+    try {
+      const res = await sendTextCommand(text);
+      showResponse(res);
 
-    renderTable(inventory);
-    renderChart(inventory, res.chartData);
-
-    setStatus("Ready", "ready");
+      renderTable(inventory);
+      renderChart(inventory, res.chartData);
+    } finally {
+      setControlsDisabled(false);
+      setStatus("Ready", "ready");
+    }
   }
 
   sendBtn.addEventListener("click", handleSend);
@@ -689,18 +809,24 @@ function wireEvents() {
   // Demo pills
   document.querySelectorAll(".pill").forEach(pill => {
     pill.addEventListener("click", async () => {
+      if (pill.disabled) return;
       const cmd = pill.dataset.cmd;
       document.getElementById("textInput").value = cmd;
       setStatus("Thinking…", "ready");
+      setControlsDisabled(true);
 
-      const res = await sendTextCommand(cmd);
-      showResponse(res);
+      try {
+        const res = await sendTextCommand(cmd);
+        showResponse(res);
 
-      renderTable(inventory);
-      renderChart(inventory, res.chartData);
+        renderTable(inventory);
+        renderChart(inventory, res.chartData);
 
-      document.getElementById("textInput").value = "";
-      setStatus("Ready", "ready");
+        document.getElementById("textInput").value = "";
+      } finally {
+        setControlsDisabled(false);
+        setStatus("Ready", "ready");
+      }
     });
   });
 }

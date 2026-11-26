@@ -24,7 +24,7 @@ India has **12 million+ Kirana (grocery) stores**, most run by owners who:
 
 ```mermaid
 flowchart LR
-    A["🎤 Shopkeeper<br/>speaks in any<br/>Indian language"] -->|audio blob| B["🧏 Groq Whisper<br/>whisper-large-v3-turbo<br/>Transcription"]
+    A["🎤 Shopkeeper<br/>speaks in any<br/>Indian language"] -->|audio blob| B["🧏 Groq Whisper<br/>whisper-large-v3<br/>Transcription"]
     B -->|transcript| C["🧠 Groq LLM<br/>gpt-oss-20b<br/>Intent + SQL + Reply"]
     C -->|structured JSON| D["🗄️ SQLite<br/>Execute safe SQL<br/>Update inventory"]
     D -->|result| E["🔊 gTTS<br/>Text-to-Speech<br/>Audio reply"]
@@ -32,7 +32,7 @@ flowchart LR
 
 | Step | Component | Purpose |
 |------|-----------|---------|
-| **1. Listen** | Groq `whisper-large-v3-turbo` | Transcribes multilingual audio with Kirana-context prompting |
+| **1. Listen** | Groq `whisper-large-v3` | Transcribes multilingual audio with Kirana-context prompting |
 | **2. Think** | Groq `gpt-oss-20b` | Detects language, extracts intent, generates safe SQL, writes a local-language reply |
 | **3. Act** | SQLite + authorizer | Executes sandboxed SQL (ADD / SELL / ANALYTICS) with injection protection |
 | **4. Speak** | gTTS | Converts the reply to speech in the detected language and streams it back |
@@ -45,7 +45,7 @@ flowchart LR
 |-------|------------|
 | **Backend** | [FastAPI](https://fastapi.tiangolo.com/) (Python) |
 | **Database** | SQLite (zero-config, file-based) |
-| **Speech-to-Text** | [Groq Whisper](https://console.groq.com/) (`whisper-large-v3-turbo`) |
+| **Speech-to-Text** | [Groq Whisper](https://console.groq.com/) (`whisper-large-v3`) |
 | **LLM** | [Groq](https://console.groq.com/) (`openai/gpt-oss-20b`) |
 | **Text-to-Speech** | [gTTS](https://github.com/pndurette/gTTS) (Google TTS) |
 | **Frontend** | Vanilla HTML/CSS/JS + [Chart.js](https://www.chartjs.org/) |

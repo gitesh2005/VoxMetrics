@@ -493,6 +493,60 @@ body {
   background: #DCFCE7;
 }
 
+/* ── User Recording Audio Player ──────────────── */
+.user-audio-wrap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid #E2E8F0;
+  flex-wrap: wrap;
+}
+
+.hear-recording-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: 1px solid #0284C7;
+  border-radius: 6px;
+  background: #F0F9FF;
+  color: #0369A1;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.hear-recording-btn:hover {
+  background: #E0F2FE;
+  border-color: #0369A1;
+  color: #075985;
+}
+
+.hear-recording-btn:active {
+  background: #BAE6FD;
+}
+
+.user-audio-player {
+  height: 34px;
+  flex: 1;
+  min-width: 200px;
+}
+
+/* ── Disabled states during in-flight requests ── */
+.mic-btn:disabled,
+.mic-btn.disabled,
+.send-btn:disabled,
+.text-input:disabled,
+.pill:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
 /* ── Footer ───────────────────────────────────── */
 .footer {
   text-align: center;
