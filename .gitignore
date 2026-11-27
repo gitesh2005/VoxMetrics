@@ -1,3 +1,4 @@
 .env
-voxmetrics.db
+data/*.db
 __pycache__/
+.venv/

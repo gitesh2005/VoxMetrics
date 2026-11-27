@@ -5,24 +5,19 @@ import logging
 import math
 import os
 import re
-import sqlite3
-import tempfile
-from contextlib import asynccontextmanager, closing
+from decimal import Decimal
 from pathlib import Path
 from typing import Literal, Optional
 
-from fastapi import FastAPI, File, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from groq import Groq, GroqError
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, field_validator
 
-import database
-from database import initialize_database, read_inventory
+from .database import UnknownInventoryItem, execute_analytics_query, read_inventory, update_inventory_batch
 
-load_dotenv(Path(__file__).with_name(".env"))
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(PROJECT_ROOT / ".env")
 api_key = os.getenv("GROQ_API_KEY")
 client = Groq(api_key=api_key, timeout=30, max_retries=1) if api_key else None
 logger = logging.getLogger("voxmetrics")
@@ -32,11 +27,21 @@ class Command(BaseModel):
     transcript: str = Field(max_length=4000)
 
 
+class CommandItem(BaseModel):
+    action: Optional[Literal["ADD", "SELL"]] = None
+    item_name: Optional[str] = None
+    quantity: Optional[float] = Field(default=None, strict=True)
+
+    @field_validator("quantity", mode="before")
+    @classmethod
+    def numeric_quantity(cls, value):
+        return value if type(value) in (int, float) else None
+
+
 class Decision(BaseModel):
     detected_lang: Literal["hi", "ta", "mr", "bn", "te", "en"] = "hi"
-    intent: Literal["ADD_INVENTORY", "SELL_ITEM", "ANALYTICS_QUERY", "INCOMPLETE_INPUT", "NOISE_ERROR"]
-    item_name: Optional[str] = None
-    quantity: Optional[float] = None
+    intent: Literal["INVENTORY_UPDATE", "ADD_INVENTORY", "SELL_ITEM", "ANALYTICS_QUERY", "INCOMPLETE_INPUT", "NOISE_ERROR"]
+    items: list[CommandItem] = Field(default_factory=list)
     metric: Optional[str] = None
     sql_query: str = ""
     reply_local: str = ""
@@ -67,9 +72,8 @@ SYSTEM_PROMPT = """You are an AI assistant for an Indian Kirana grocery store in
 Analyze the user transcript and return ONLY a single JSON object with these exact keys:
 {
   "detected_lang": "hi" | "ta" | "mr" | "bn" | "te" | "en",
-  "intent": "ADD_INVENTORY" | "SELL_ITEM" | "ANALYTICS_QUERY" | "INCOMPLETE_INPUT" | "NOISE_ERROR",
-  "item_name": "curd" | "sugar" | "milk" | "rice" | "tea" | "lentils" | "oil" | "salt" | null,
-  "quantity": <float number or null>,
+  "intent": "INVENTORY_UPDATE" | "ANALYTICS_QUERY" | "INCOMPLETE_INPUT" | "NOISE_ERROR",
+  "items": [{"action": "ADD" | "SELL", "item_name": "curd" | "sugar" | "milk" | "rice" | "tea" | "lentils" | "oil" | "salt" | null, "quantity": <number or null>}],
   "metric": "lowest_stock" | "highest_price" | "lowest_price" | "highest_profit" | "top_selling" | "all_inventory" | null,
   "sql_query": "<SQL string or empty>",
   "reply_local": "<conversational sentence in detected_lang>"
@@ -91,14 +95,20 @@ Strict Rules:
    Convert grams to kg (500 gram = 0.5) and ml to L (500 ml = 0.5). Never invent amounts.
 
 3. Strict Quantity Rule for Stock Updates:
-   If intent is ADD_INVENTORY or SELL_ITEM:
-   - Extract the explicit numeric quantity mentioned in the transcript.
-   - If quantity is null, missing, or <= 0: YOU MUST SET intent = "INCOMPLETE_INPUT", sql_query = "", and ask for the quantity in reply_local. NEVER GUESS 1.
+   Use intent INVENTORY_UPDATE for single-item, multi-item, and mixed stock updates:
+   - Include one entry per mentioned item in spoken order, even for a single item.
+     Handle comma-separated clauses, conjunctions, shared verbs, and mixed-language names.
+     Assign ADD to each item being stocked and SELL to each item being sold or deducted,
+     according to the verb governing that item. Preserve repeated items as separate actions.
+     For "10 packet dahi add karo aur 2 kilo cheeni bik gayi", return items
+     [{"action":"ADD","item_name":"curd","quantity":10},{"action":"SELL","item_name":"sugar","quantity":2}].
+   - Each item's quantity must come from the transcript. Never use an inventory value, guess 1,
+     borrow another item's quantity, or silently omit an incomplete or unknown item.
+   - If items is empty or ANY quantity is missing or <= 0, return INCOMPLETE_INPUT and ask for
+     the missing quantity in reply_local. If any item is unknown, ask for the item.
+   - If an item's action is unclear, return INCOMPLETE_INPUT and ask whether to add or sell it.
 
-4. Stock Update SQL:
-   - ADD_INVENTORY: UPDATE inventory SET quantity = quantity + <qty> WHERE item_name = '<item>'
-   - SELL_ITEM: UPDATE inventory SET quantity = quantity - <qty>, units_sold = units_sold + <qty> WHERE item_name = '<item>'
-   Set metric = null for stock updates.
+4. For stock updates, set sql_query = "" and metric = null.
 
 5. Analytics Query Metrics & SQL:
    - "mehnga" / "most expensive" / "costly" / "highest price" / "rate" -> metric = "highest_price",
@@ -111,7 +121,7 @@ Strict Rules:
      sql_query = "SELECT item_name AS label, units_sold AS value FROM inventory ORDER BY value DESC LIMIT 3;"
    - "kam bacha hai" / "low stock" / "stock khatam" -> metric = "lowest_stock",
      sql_query = "SELECT item_name AS label, quantity AS value FROM inventory ORDER BY value ASC LIMIT 3;"
-   Set item_name = null and quantity = null for analytics queries.
+   Set items = [] for analytics queries.
 
 6. Incomplete / Noise:
    - If audio/transcript is noise or unintelligible: intent = "NOISE_ERROR", sql_query = "".
@@ -119,6 +129,21 @@ Strict Rules:
 
 7. Conciseness & Non-Repetition:
    Write at most 1-2 short, direct sentences in reply_local. Never repeat the same item, number, or phrase twice."""
+
+LANG_MAP = {"hi": "hi", "ta": "ta", "mr": "mr", "bn": "bn", "te": "te", "en": "en"}
+
+SILENCE_HALLUCINATIONS = {
+    "", "you", "thank you", "thank you so much", "thank you very much",
+    "thanks", "thanks for watching", "thank you for watching",
+    "bye", "bye bye", "goodbye", "subscribe", "please subscribe",
+    "watching", "the end",
+}
+
+CHAT_MODELS = [
+    "llama-3.3-70b-versatile",
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+]
 
 
 class ExecutionResult:
@@ -130,6 +155,27 @@ class ExecutionResult:
 
 def execute_decision(decision: Decision) -> ExecutionResult:
     sql = decision.sql_query.strip().removesuffix(";").strip()
+    is_update = decision.intent in {"INVENTORY_UPDATE", "ADD_INVENTORY", "SELL_ITEM"}
+    if is_update:
+        invalid = [
+            item for item in decision.items
+            if item.quantity is None or not math.isfinite(item.quantity) or item.quantity <= 0
+        ]
+        if not decision.items or invalid:
+            decision.intent = "INCOMPLETE_INPUT"
+            decision.sql_query = ""
+            prompts = {
+                "hi": "Kripya sahi quantity batayein",
+                "ta": "Sariyana alavai sollungal",
+                "mr": "Krupaya yogya praman sanga",
+                "bn": "Shothik poriman bolun",
+                "te": "Dayachesi saraina parimanam cheppandi",
+                "en": "Please specify a positive quantity",
+            }
+            names = ", ".join(item.item_name.capitalize() for item in invalid if item.item_name)
+            prompt = prompts[decision.detected_lang]
+            return ExecutionResult(grounded_reply=f"{prompt} ({names})." if names else f"{prompt}.")
+
     if re.search(r"\b(DROP|DELETE|ALTER|INSERT|TRUNCATE)\b", decision.sql_query, re.I):
         return ExecutionResult(error_message="Forbidden SQL command.")
 
@@ -139,132 +185,60 @@ def execute_decision(decision: Decision) -> ExecutionResult:
     # ---------------------------------------------------------
     # Layer 3: Python Whitelist & Deterministic Grounding (UPDATE)
     # ---------------------------------------------------------
-    if decision.intent in {"ADD_INVENTORY", "SELL_ITEM"}:
-        raw_item = (decision.item_name or "").lower().strip()
-        canonical_item = ITEM_ALIASES.get(raw_item)
-
-        # Item whitelist validation
-        if not canonical_item or canonical_item not in ALLOWED_ITEMS:
-            not_found = (
-                f"Item '{decision.item_name or 'item'}' inventory mein uplabdh nahi hai. Kripya sahi grocery item batayein."
+    if is_update:
+        try:
+            items = []
+            legacy_action = {"ADD_INVENTORY": "ADD", "SELL_ITEM": "SELL"}.get(decision.intent)
+            for item in decision.items:
+                name = ITEM_ALIASES.get((item.item_name or "").strip().lower())
+                if name not in ALLOWED_ITEMS:
+                    raise UnknownInventoryItem(item.item_name or "item")
+                action = item.action or legacy_action
+                if action is None:
+                    decision.intent = "INCOMPLETE_INPUT"
+                    prompts = {
+                        "hi": "Jodna hai ya bechna hai",
+                        "ta": "Serkkava allathu virkava",
+                        "mr": "Jodayche ki vikayche",
+                        "bn": "Jog korbo naki bikri korbo",
+                        "te": "Cherchala leka ammala",
+                        "en": "Add or sell",
+                    }
+                    return ExecutionResult(grounded_reply=f"{prompts[decision.detected_lang]} ({name.capitalize()})?")
+                items.append((name, item.quantity, action))
+            changes = update_inventory_batch(items)
+        except UnknownInventoryItem as exc:
+            decision.intent = "INCOMPLETE_INPUT"
+            reply = (
+                f"Item '{exc}' inventory mein uplabdh nahi hai. Kripya sahi grocery item batayein."
                 if decision.detected_lang == "hi"
-                else f"Item '{decision.item_name or 'item'}' is not in the inventory."
+                else f"Item '{exc}' is not in the inventory. Please specify an inventory item."
             )
-            return ExecutionResult(error_message=not_found)
+            return ExecutionResult(grounded_reply=reply)
 
-        # Quantity validation
-        if decision.quantity is None or decision.quantity <= 0:
-            qty_missing = (
-                f"{canonical_item.capitalize()} ki quantity batayein, kitna amount {'jodna' if decision.intent == 'ADD_INVENTORY' else 'bechna'} hai?"
-                if decision.detected_lang == "hi"
-                else f"Please specify a valid quantity for {canonical_item.capitalize()}."
-            )
-            return ExecutionResult(error_message=qty_missing)
-
-        qty = float(decision.quantity)
-
-        with closing(sqlite3.connect(database.DB_PATH)) as db, db:
-            # 1. Read exact before_qty and unit directly from SQLite
-            row = db.execute(
-                "SELECT quantity, unit FROM inventory WHERE item_name = ?", (canonical_item,)
-            ).fetchone()
-            if not row:
-                return ExecutionResult(error_message=f"Item '{canonical_item}' not found in database.")
-
-            before_qty, unit = float(row[0]), str(row[1])
-
-            # Check stock availability for sales
-            if decision.intent == "SELL_ITEM":
-                if before_qty < qty:
-                    insufficient = (
-                        f"Paryapt stock nahi hai. {canonical_item.capitalize()} ka sirf {_fmt_value(before_qty)} {unit} bacha hai."
-                        if decision.detected_lang == "hi"
-                        else f"Insufficient stock. Only {_fmt_value(before_qty)} {unit} of {canonical_item.capitalize()} available."
-                    )
-                    return ExecutionResult(error_message=insufficient)
-
-                db.execute(
-                    "UPDATE inventory SET quantity = quantity - ?, units_sold = units_sold + ? WHERE item_name = ?",
-                    (qty, qty, canonical_item),
-                )
-            else:
-                db.execute(
-                    "UPDATE inventory SET quantity = quantity + ? WHERE item_name = ?",
-                    (qty, canonical_item),
-                )
-
-            # 2. Read exact after_qty directly from SQLite
-            after_row = db.execute(
-                "SELECT quantity FROM inventory WHERE item_name = ?", (canonical_item,)
-            ).fetchone()
-            after_qty = float(after_row[0])
-
-        # 3. Construct deterministic grounded fact string
-        b_str, a_str, q_str = _fmt_value(before_qty), _fmt_value(after_qty), _fmt_value(qty)
-        item_cap = canonical_item.capitalize()
-        is_add = decision.intent == "ADD_INVENTORY"
-
-        if decision.detected_lang == "hi":
-            if is_add:
-                grounded = f"{item_cap} stock update hua: {b_str} {unit} -> {a_str} {unit} (+{q_str} {unit} joda gaya)."
-            else:
-                grounded = f"{item_cap} bik gaya: {b_str} {unit} -> {a_str} {unit} ({q_str} {unit} kam hua)."
-        elif decision.detected_lang == "ta":
-            grounded = f"{item_cap} irupu matram: {b_str} {unit} -> {a_str} {unit}."
-        else:
-            action = "added" if is_add else "sold"
-            sign = "+" if is_add else "-"
-            grounded = f"Updated {item_cap}: {b_str} {unit} -> {a_str} {unit} ({sign}{q_str} {unit} {action})."
-
-        return ExecutionResult(grounded_reply=grounded)
+        introductions = {
+            "hi": "Stock update ho gaya",
+            "ta": "Irupu pudhuppikkappattadhu",
+            "mr": "Satha adyatan zala",
+            "bn": "Mojut update hoyeche",
+            "te": "Nilva navikarinchabadindi",
+            "en": "Stock updated",
+        }
+        parts = []
+        for name, before, after, unit in changes:
+            delta = Decimal(str(after)) - Decimal(str(before))
+            amount = format(delta.normalize(), "+f") if delta else "0"
+            parts.append(f"{name.capitalize()} ({amount} {unit})")
+        return ExecutionResult(grounded_reply=f"{introductions[decision.detected_lang]}: {', '.join(parts)}.")
 
     # ---------------------------------------------------------
     # Layer 4: Deterministic Grounding (ANALYTICS_QUERY)
     # ---------------------------------------------------------
-    with closing(sqlite3.connect(database.DB_PATH)) as db, db:
-        if not re.match(r"^SELECT\s", sql, re.I):
-            # Fall back to metric map if LLM SQL was malformed
-            sql = METRIC_SQL_MAP.get(decision.metric, "SELECT item_name AS label, price AS value FROM inventory ORDER BY value DESC LIMIT 3")
+    if not re.match(r"^SELECT\s", sql, re.I):
+        # Fall back to metric map if LLM SQL was malformed
+        sql = METRIC_SQL_MAP.get(decision.metric, "SELECT item_name AS label, price AS value FROM inventory ORDER BY value DESC LIMIT 3")
 
-        columns = {"item_name", "quantity", "unit", "price", "units_sold", ""}
-        reads_inventory = False
-
-        def authorize(action, table, column, schema, source):
-            nonlocal reads_inventory
-            if action == sqlite3.SQLITE_SELECT:
-                return sqlite3.SQLITE_OK
-            if action == sqlite3.SQLITE_READ and table == "inventory" and column in columns:
-                reads_inventory = True
-                return sqlite3.SQLITE_OK
-            if action == sqlite3.SQLITE_FUNCTION and column in {"sum", "avg", "min", "max", "count", "round"}:
-                return sqlite3.SQLITE_OK
-            return sqlite3.SQLITE_DENY
-
-        db.set_authorizer(authorize)
-        db.set_progress_handler(lambda: 1, 100_000)
-        cursor = db.execute(sql)
-        if not reads_inventory or len(cursor.description) != 2:
-            raise ValueError("Expected label and value")
-        raw_rows = cursor.fetchall()
-
-        # Fetch units for every returned item_name so reply_local can include them
-        db.set_authorizer(None)
-        unit_map = {
-            row[0]: row[1]
-            for row in db.execute(
-                "SELECT item_name, unit FROM inventory"
-            ).fetchall()
-        }
-
-        chart = []
-        for label, value in raw_rows:
-            if not isinstance(value, (float, int)) or not math.isfinite(value):
-                raise ValueError("Expected a numeric chart value")
-            chart.append({
-                "label": str(label),
-                "value": value,
-                "unit": unit_map.get(str(label), ""),
-            })
+    chart = execute_analytics_query(sql)
 
     # Generate deterministic, verified reply using ONLY exact database numbers
     analytics_reply = format_analytics_reply(
@@ -277,12 +251,9 @@ def execute_decision(decision: Decision) -> ExecutionResult:
     return ExecutionResult(chart=chart, grounded_reply=analytics_reply)
 
 
-LANG_MAP = {"hi": "hi", "ta": "ta", "mr": "mr", "bn": "bn", "te": "te", "en": "en"}
-
-
 # ---------------------------------------------------------------------------
 # Analytics reply builder
-# Converts executed SQL rows → a fully spoken sentence so reply_local is
+# Converts executed SQL rows -> a fully spoken sentence so reply_local is
 # never left as a bare intro like "Here are the items:".
 # ---------------------------------------------------------------------------
 
@@ -316,7 +287,7 @@ def format_analytics_reply(
     Strategy:
       1. Infer the query type from metric or SQL text.
       2. Format each row with real value + unit.
-      3. Compose a 1–2 sentence reply in detected_lang with exact numbers.
+      3. Compose a 1-2 sentence reply in detected_lang with exact numbers.
     """
     if not chart:
         return "Inventory mein data uplabdh nahi hai." if detected_lang == "hi" else "No data available in inventory."
@@ -393,7 +364,7 @@ def deduplicate_sentences(text: str) -> str:
     while preserving order and punctuation."""
     if not text:
         return ""
-    tokens = re.split(r"([.।!?]+)", text)
+    tokens = re.split(r"((?:(?<!\d)\.|\.(?!\d)|[।!?])+)", text)
     seen = set()
     result_parts = []
     i = 0
@@ -462,7 +433,7 @@ def clean_transcript(text: str) -> str:
 def generate_tts_base64(text: str, lang: str) -> str:
     """Generate an MP3 of *text* via gTTS and return its base64 string.
 
-    Falls back through lang → 'hi' → 'en' if the requested language code
+    Falls back through lang -> 'hi' -> 'en' if the requested language code
     is rejected, and returns an empty string if TTS fails entirely so that
     the calling endpoint never crashes.
     """
@@ -487,13 +458,6 @@ def generate_tts_base64(text: str, lang: str) -> str:
         except Exception:
             logger.warning("gTTS failed for lang=%s, trying next fallback", try_lang)
     return ""
-
-
-CHAT_MODELS = [
-    "llama-3.3-70b-versatile",
-    "openai/gpt-oss-120b",
-    "openai/gpt-oss-20b",
-]
 
 
 def call_groq_chat(messages):
@@ -534,21 +498,6 @@ def run_ai_pipeline(transcript: str):
     ])
     decision = Decision.model_validate_json(completion.choices[0].message.content or "")
 
-    # Layer 2 Guardrail: enforce quantity requirement on stock updates
-    if decision.intent in {"ADD_INVENTORY", "SELL_ITEM"}:
-        if decision.quantity is None or decision.quantity <= 0:
-            decision.intent = "INCOMPLETE_INPUT"
-            decision.sql_query = ""
-            canonical = ITEM_ALIASES.get((decision.item_name or "").lower().strip())
-            disp = (canonical or decision.item_name or "item").capitalize()
-            action_word = "jodna (add)" if decision.intent == "ADD_INVENTORY" else "bechna (sell)"
-            if decision.detected_lang == "hi":
-                decision.reply_local = f"{disp} ki quantity missing hai. Kitna amount {action_word} karna hai?"
-            elif decision.detected_lang == "ta":
-                decision.reply_local = f"{disp} alavu enna?"
-            else:
-                decision.reply_local = f"Please specify the quantity to update for {disp}."
-
     exec_res = execute_decision(decision)
 
     if exec_res.error_message:
@@ -574,151 +523,76 @@ def run_ai_pipeline(transcript: str):
     )
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    initialize_database()
-    yield
-
-
-app = FastAPI(lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
-)
-
-
-@app.get("/api/inventory")
-def get_inventory():
-    return read_inventory()
-
-
-@app.post("/api/process-command")
-def process_command(command: Command):
-    try:
-        result = run_ai_pipeline(command.transcript)
-        result["reply_local"] = deduplicate_sentences(result["reply_local"])
-        audio_b64 = generate_tts_base64(result["reply_local"], result["detected_lang"])
-        return {**result, "audio_base64": audio_b64}
-    except RuntimeError as exc:
-        status, message = 503, str(exc)
-    except (GroqError, ValidationError):
-        status, message = 502, "Could not interpret the command. Please try again."
-    except (ValueError, sqlite3.DatabaseError):
-        status, message = 400, "Could not apply the command. Check the item, quantity and available stock."
-    return JSONResponse(status_code=status, content=dict(
-        intent="NOISE_ERROR", detected_lang="en", reply_local=message,
-        chart_data=None, inventory=read_inventory(), audio_base64="",
-    ))
-
-
-@app.post("/api/voice-command")
-async def voice_command(audio: UploadFile = File(...)):
-    """Accept an uploaded audio file, transcribe it with Groq Whisper,
-    run the AI pipeline on the transcript, generate TTS, and return
-    the full response payload."""
+def process_voice_command(audio_bytes: bytes, filename: str, content_type: str) -> dict:
+    """Transcribe audio with Groq Whisper (confidence gate + deduplication),
+    run the AI pipeline, and generate gTTS audio."""
     if not client:
-        return JSONResponse(status_code=503, content=dict(
-            transcript="", intent="NOISE_ERROR", detected_lang="en",
-            reply_local="Configure GROQ_API_KEY to process voice commands.",
-            chart_data=None, inventory=read_inventory(), audio_base64="",
-        ))
-    try:
-        audio_bytes = await audio.read()
-        filename = audio.filename or "recording.wav"
-        content_type = audio.content_type or ("audio/wav" if filename.endswith(".wav") else "audio/webm")
+        raise RuntimeError("Configure GROQ_API_KEY to process voice commands.")
 
-        # ---------------------------------------------------------
-        # Layer 1: Whisper Confidence Gate & Deduplication
-        # ---------------------------------------------------------
-        whisper_kwargs = dict(
-            model="whisper-large-v3",
-            file=(filename, audio_bytes, content_type),
-            response_format="verbose_json",
-            temperature=0.0,
-            prompt=(
-                "Hindi, Hinglish, and English Kirana store voice command: "
-                "konsa item sabse mehnga hai, sabse sasta saman, "
-                "10 packet mattha add karo, 5 kilo cheeni, 2 liter doodh bik gaya, "
-                "chawal, dal, tel, namak, chai patti."
-            ),
+    # ---------------------------------------------------------
+    # Layer 1: Whisper Confidence Gate & Deduplication
+    # ---------------------------------------------------------
+    whisper_kwargs = dict(
+        model="whisper-large-v3",
+        file=(filename, audio_bytes, content_type),
+        response_format="verbose_json",
+        temperature=0.0,
+        prompt=(
+            "Hindi, Hinglish, and English Kirana store voice command: "
+            "konsa item sabse mehnga hai, sabse sasta saman, "
+            "10 packet mattha add karo, 5 kilo cheeni, 2 liter doodh bik gaya, "
+            "chawal, dal, tel, namak, chai patti."
+        ),
+    )
+
+    try:
+        transcription = client.audio.transcriptions.create(
+            condition_on_previous_text=False,
+            **whisper_kwargs,
+        )
+    except (TypeError, GroqError):
+        transcription = client.audio.transcriptions.create(
+            **whisper_kwargs,
         )
 
-        try:
-            transcription = client.audio.transcriptions.create(
-                condition_on_previous_text=False,
-                **whisper_kwargs,
-            )
-        except (TypeError, GroqError):
-            transcription = client.audio.transcriptions.create(
-                **whisper_kwargs,
-            )
+    if isinstance(transcription, dict):
+        raw_transcript = transcription.get("text", "").strip()
+        segments = transcription.get("segments", []) or []
+    else:
+        raw_transcript = getattr(transcription, "text", "").strip()
+        segments = getattr(transcription, "segments", []) or []
 
-        if isinstance(transcription, dict):
-            raw_transcript = transcription.get("text", "").strip()
-            segments = transcription.get("segments", []) or []
-        else:
-            raw_transcript = getattr(transcription, "text", "").strip()
-            segments = getattr(transcription, "segments", []) or []
+    # Deduplicate repeated loops in Whisper transcript
+    transcript = clean_transcript(raw_transcript)
 
-        # Deduplicate repeated loops in Whisper transcript
-        transcript = clean_transcript(raw_transcript)
+    no_speech_probs = []
+    for s in segments:
+        p = s.get("no_speech_prob") if isinstance(s, dict) else getattr(s, "no_speech_prob", None)
+        if p is not None:
+            no_speech_probs.append(float(p))
 
-        no_speech_probs = []
-        for s in segments:
-            p = s.get("no_speech_prob") if isinstance(s, dict) else getattr(s, "no_speech_prob", None)
-            if p is not None:
-                no_speech_probs.append(float(p))
+    clean_text = re.sub(r"[^\w\s]", "", transcript.lower()).strip()
 
-        clean_text = re.sub(r"[^\w\s]", "", transcript.lower()).strip()
-        silence_hallucinations = {
-            "", "you", "thank you", "thank you so much", "thank you very much",
-            "thanks", "thanks for watching", "thank you for watching",
-            "bye", "bye bye", "goodbye", "subscribe", "please subscribe",
-            "watching", "the end",
-        }
+    # Check no_speech_prob > 0.65
+    has_high_no_speech = False
+    if no_speech_probs:
+        avg_no_speech = sum(no_speech_probs) / len(no_speech_probs)
+        if avg_no_speech > 0.65 or (len(no_speech_probs) == 1 and no_speech_probs[0] > 0.65):
+            has_high_no_speech = True
 
-        # Check no_speech_prob > 0.65
-        has_high_no_speech = False
-        if no_speech_probs:
-            avg_no_speech = sum(no_speech_probs) / len(no_speech_probs)
-            if avg_no_speech > 0.65 or (len(no_speech_probs) == 1 and no_speech_probs[0] > 0.65):
-                has_high_no_speech = True
+    if not transcript or len(transcript) < 2 or clean_text in SILENCE_HALLUCINATIONS or has_high_no_speech:
+        msg = "Awaaz clear nahi aayi, kripya mic ke paas bolkar dubara try karein."
+        return dict(
+            transcript=transcript if transcript else "",
+            intent="NOISE_ERROR",
+            detected_lang="hi",
+            reply_local=msg,
+            chart_data=None,
+            inventory=read_inventory(),
+            audio_base64=generate_tts_base64(msg, "hi"),
+        )
 
-        if not transcript or len(transcript) < 2 or clean_text in silence_hallucinations or has_high_no_speech:
-            msg = "Awaaz clear nahi aayi, kripya mic ke paas bolkar dubara try karein."
-            return dict(
-                transcript=transcript if transcript else "",
-                intent="NOISE_ERROR",
-                detected_lang="hi",
-                reply_local=msg,
-                chart_data=None,
-                inventory=read_inventory(),
-                audio_base64=generate_tts_base64(msg, "hi"),
-            )
-
-        result = run_ai_pipeline(transcript)
-        result["reply_local"] = deduplicate_sentences(result["reply_local"])
-        audio_b64 = generate_tts_base64(result["reply_local"], result["detected_lang"])
-        return {**result, "transcript": transcript, "audio_base64": audio_b64}
-
-    except (GroqError, ValidationError) as exc:
-        logger.exception("Voice pipeline error")
-        msg = "Could not interpret the voice command. Please try again."
-        return JSONResponse(status_code=502, content=dict(
-            transcript="", intent="NOISE_ERROR", detected_lang="en",
-            reply_local=msg, chart_data=None, inventory=read_inventory(),
-            audio_base64="",
-        ))
-    except (ValueError, sqlite3.DatabaseError) as exc:
-        logger.exception("Voice pipeline DB error")
-        msg = "Could not apply the command. Check the item, quantity and available stock."
-        return JSONResponse(status_code=400, content=dict(
-            transcript="", intent="NOISE_ERROR", detected_lang="en",
-            reply_local=msg, chart_data=None, inventory=read_inventory(),
-            audio_base64="",
-        ))
-
-
-app.mount("/", StaticFiles(directory=Path(__file__).with_name("static"), html=True))
+    result = run_ai_pipeline(transcript)
+    result["reply_local"] = deduplicate_sentences(result["reply_local"])
+    audio_b64 = generate_tts_base64(result["reply_local"], result["detected_lang"])
+    return {**result, "transcript": transcript, "audio_base64": audio_b64}
