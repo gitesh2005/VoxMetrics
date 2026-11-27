@@ -28,13 +28,15 @@ class Command(BaseModel):
 
 
 class CommandItem(BaseModel):
-    action: Optional[Literal["ADD", "SELL"]] = None
+    action: Optional[Literal["ADD", "SELL", "UPDATE_PRICE"]] = None
     item_name: Optional[str] = None
     quantity: Optional[float] = Field(default=None, strict=True)
+    new_price: Optional[float] = Field(default=None, strict=True)
+    price_words: Optional[str] = None
 
-    @field_validator("quantity", mode="before")
+    @field_validator("quantity", "new_price", mode="before")
     @classmethod
-    def numeric_quantity(cls, value):
+    def numeric_value(cls, value):
         return value if type(value) in (int, float) else None
 
 
@@ -73,7 +75,7 @@ Analyze the user transcript and return ONLY a single JSON object with these exac
 {
   "detected_lang": "hi" | "ta" | "mr" | "bn" | "te" | "en",
   "intent": "INVENTORY_UPDATE" | "ANALYTICS_QUERY" | "INCOMPLETE_INPUT" | "NOISE_ERROR",
-  "items": [{"action": "ADD" | "SELL", "item_name": "curd" | "sugar" | "milk" | "rice" | "tea" | "lentils" | "oil" | "salt" | null, "quantity": <number or null>}],
+  "items": [{"action": "ADD" | "SELL" | "UPDATE_PRICE", "item_name": "curd" | "sugar" | "milk" | "rice" | "tea" | "lentils" | "oil" | "salt" | null, "quantity": <stock amount or null>, "new_price": <explicit new selling price or null>, "price_words": <verbatim number words if spoken as words, else null>}],
   "metric": "lowest_stock" | "highest_price" | "lowest_price" | "highest_profit" | "top_selling" | "all_inventory" | null,
   "sql_query": "<SQL string or empty>",
   "reply_local": "<conversational sentence in detected_lang>"
@@ -104,14 +106,24 @@ Strict Rules:
      [{"action":"ADD","item_name":"curd","quantity":10},{"action":"SELL","item_name":"sugar","quantity":2}].
    - Each item's quantity must come from the transcript. Never use an inventory value, guess 1,
      borrow another item's quantity, or silently omit an incomplete or unknown item.
-   - If items is empty or ANY quantity is missing or <= 0, return INCOMPLETE_INPUT and ask for
+   - If items is empty or ANY ADD/SELL quantity is missing or <= 0, return INCOMPLETE_INPUT and ask for
      the missing quantity in reply_local. If any item is unknown, ask for the item.
    - If an item's action is unclear, return INCOMPLETE_INPUT and ask whether to add or sell it.
 
 4. For stock updates, set sql_query = "" and metric = null.
+   For a request to set an item's selling price, use INVENTORY_UPDATE with action UPDATE_PRICE,
+   quantity null, and new_price in rupees per inventory unit. Recognize price, rate, daam, bhav,
+   keemat, rupaye and regional equivalents. "cheeni ka price 50 rupaye kar do" sets sugar to 50,
+   "doodh ka rate 68 kar do" sets milk to 68, and "set rice price to 65" sets rice to 65.
+   If the new price is given in words, copy just those number words into price_words.
+   Never infer a price from inventory, a stock quantity, another item, a budget or a prior price.
+   If the requested new price is absent, ambiguous, or not positive, return INCOMPLETE_INPUT
+   and ask for the exact selling price. Keep all clauses together, including stock changes.
+   Questions about existing prices or prices matching a condition are read-only ANALYTICS_QUERY.
+   For "doodh ka rate kya hai", select the price for milk.
 
 5. Analytics Query Metrics & SQL:
-   - "mehnga" / "most expensive" / "costly" / "highest price" / "rate" -> metric = "highest_price",
+   - "mehnga" / "most expensive" / "costly" / "highest price" -> metric = "highest_price",
      sql_query = "SELECT item_name AS label, price AS value FROM inventory ORDER BY value DESC LIMIT 3;"
    - "sasta" / "cheapest" / "lowest price" -> metric = "lowest_price",
      sql_query = "SELECT item_name AS label, price AS value FROM inventory ORDER BY value ASC LIMIT 3;"
@@ -125,7 +137,7 @@ Strict Rules:
 
 6. Incomplete / Noise:
    - If audio/transcript is noise or unintelligible: intent = "NOISE_ERROR", sql_query = "".
-   - If quantity or item is missing on an update: intent = "INCOMPLETE_INPUT", sql_query = "".
+   - If the item or the value required for its action is missing: intent = "INCOMPLETE_INPUT", sql_query = "".
 
 7. Conciseness & Non-Repetition:
    Write at most 1-2 short, direct sentences in reply_local. Never repeat the same item, number, or phrase twice."""
@@ -153,12 +165,37 @@ class ExecutionResult:
         self.error_message = error_message
 
 
-def execute_decision(decision: Decision) -> ExecutionResult:
+def _price_stated(item: CommandItem, transcript: str) -> bool:
+    numbers = re.findall(r"[+-]?(?:\d+(?:,\d{2,3})*(?:\.\d+)?|\.\d+)", transcript.replace("−", "-"))
+    if any(Decimal(number.replace(",", "")) == Decimal(str(item.new_price)) for number in numbers):
+        return True
+    words = (item.price_words or "").strip().casefold()
+    return bool(words and not any(c.isdigit() for c in words)
+                and re.search(r"(?<!\w)" + re.escape(words) + r"(?!\w)", transcript.casefold()))
+
+
+def execute_decision(decision: Decision, transcript: Optional[str] = None) -> ExecutionResult:
     sql = decision.sql_query.strip().removesuffix(";").strip()
     is_update = decision.intent in {"INVENTORY_UPDATE", "ADD_INVENTORY", "SELL_ITEM"}
     if is_update:
+        for item in decision.items:
+            if item.action == "UPDATE_PRICE" and (
+                item.new_price is None or not math.isfinite(item.new_price) or item.new_price <= 0
+                or (transcript is not None and not _price_stated(item, transcript))
+            ):
+                decision.intent = "INCOMPLETE_INPUT"
+                prompts = {
+                    "hi": "Naya bikri ka daam rupaye mein batayein",
+                    "ta": "Pudhiya virpanai vilaiyai roobaayil sollungal",
+                    "mr": "Navin vikri kimmat rupayant sanga",
+                    "bn": "Notun bikrir daam takay bolun",
+                    "te": "Kotta ammaka dhara rupayallo cheppandi",
+                    "en": "Please specify the exact new selling price in rupees",
+                }
+                return ExecutionResult(grounded_reply=prompts[decision.detected_lang] + ".")
         invalid = [
             item for item in decision.items
+            if item.action != "UPDATE_PRICE"
             if item.quantity is None or not math.isfinite(item.quantity) or item.quantity <= 0
         ]
         if not decision.items or invalid:
@@ -205,7 +242,7 @@ def execute_decision(decision: Decision) -> ExecutionResult:
                         "en": "Add or sell",
                     }
                     return ExecutionResult(grounded_reply=f"{prompts[decision.detected_lang]} ({name.capitalize()})?")
-                items.append((name, item.quantity, action))
+                items.append((name, item.new_price if action == "UPDATE_PRICE" else item.quantity, action))
             changes = update_inventory_batch(items)
         except UnknownInventoryItem as exc:
             decision.intent = "INCOMPLETE_INPUT"
@@ -224,11 +261,26 @@ def execute_decision(decision: Decision) -> ExecutionResult:
             "te": "Nilva navikarinchabadindi",
             "en": "Stock updated",
         }
+        price_labels = {
+            "hi": "ka daam", "ta": "vilai", "mr": "chi kimmat", "bn": "er daam",
+            "te": "dhara", "en": "price",
+        }
         parts = []
-        for name, before, after, unit in changes:
+        for (name, before, after, unit), (_, _, action) in zip(changes, items):
+            if action == "UPDATE_PRICE":
+                old = format(Decimal(str(before)).normalize(), "f")
+                new = format(Decimal(str(after)).normalize(), "f")
+                per_unit = "packet" if unit == "packets" else unit
+                parts.append(f"{name.capitalize()} {price_labels[decision.detected_lang]} (₹{old} → ₹{new}/{per_unit})")
+                continue
             delta = Decimal(str(after)) - Decimal(str(before))
             amount = format(delta.normalize(), "+f") if delta else "0"
             parts.append(f"{name.capitalize()} ({amount} {unit})")
+        if any(action == "UPDATE_PRICE" for _, _, action in items):
+            introductions = {
+                "hi": "Update ho gaya", "ta": "Pudhuppikkappattadhu", "mr": "Badal kela",
+                "bn": "Bodol hoyeche", "te": "Mārpu chēsāmu", "en": "Updated",
+            }
         return ExecutionResult(grounded_reply=f"{introductions[decision.detected_lang]}: {', '.join(parts)}.")
 
     # ---------------------------------------------------------
@@ -498,7 +550,7 @@ def run_ai_pipeline(transcript: str):
     ])
     decision = Decision.model_validate_json(completion.choices[0].message.content or "")
 
-    exec_res = execute_decision(decision)
+    exec_res = execute_decision(decision, transcript)
 
     if exec_res.error_message:
         intent = "INCOMPLETE_INPUT" if ("nahi hai" in exec_res.error_message or "missing" in exec_res.error_message or "stock" in exec_res.error_message.lower()) else "NOISE_ERROR"

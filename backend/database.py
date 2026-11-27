@@ -32,13 +32,23 @@ def initialize_database():
                 item_name TEXT UNIQUE,
                 quantity REAL,
                 unit TEXT,
-                price REAL,
+                price_per_unit REAL,
+                price REAL GENERATED ALWAYS AS (price_per_unit) VIRTUAL,
+                cost_price REAL,
                 units_sold REAL
             )
         """)
+        columns = {row[1] for row in connection.execute("PRAGMA table_xinfo(inventory)")}
+        if "price_per_unit" not in columns:
+            connection.execute("ALTER TABLE inventory RENAME COLUMN price TO price_per_unit")
+            columns.remove("price")
+        if "price" not in columns:
+            connection.execute("ALTER TABLE inventory ADD COLUMN price REAL GENERATED ALWAYS AS (price_per_unit) VIRTUAL")
+        if "cost_price" not in columns:
+            connection.execute("ALTER TABLE inventory ADD COLUMN cost_price REAL")
         if connection.execute("SELECT 1 FROM inventory LIMIT 1").fetchone() is None:
             connection.executemany("""
-                INSERT INTO inventory (item_name, quantity, unit, price, units_sold)
+                INSERT INTO inventory (item_name, quantity, unit, price_per_unit, units_sold)
                 VALUES (?, ?, ?, ?, ?)
             """, SEED_INVENTORY)
 
@@ -48,7 +58,7 @@ def read_inventory():
     with closing(sqlite3.connect(DB_PATH)) as connection:
         connection.row_factory = sqlite3.Row
         rows = connection.execute("""
-            SELECT id, item_name, quantity, unit, price, units_sold
+            SELECT id, item_name, quantity, unit, price, price_per_unit, units_sold
             FROM inventory
             ORDER BY id
         """)
@@ -67,37 +77,48 @@ class StockChange(NamedTuple):
 
 
 def update_inventory_batch(items: list[tuple[str, float, str]]) -> list[StockChange]:
-    """Validate the whole command and record each stock transition under one write lock."""
-    if not items or any(not math.isfinite(qty) or qty <= 0 for _, qty, _ in items):
-        raise ValueError("Expected a positive finite quantity for every item")
-    if any(action not in {"ADD", "SELL"} for _, _, action in items):
-        raise ValueError("Expected ADD or SELL for every item")
+    """Validate a command and record each stock or selling-price change under one write lock."""
+    if not items or any(not math.isfinite(value) or value <= 0 for _, value, _ in items):
+        raise ValueError("Expected a positive finite amount for every item")
+    if any(action not in {"ADD", "SELL", "UPDATE_PRICE"} for _, _, action in items):
+        raise ValueError("Unknown inventory action")
 
     with closing(sqlite3.connect(DB_PATH)) as db, db:
         db.execute("BEGIN IMMEDIATE")
-        stock = {
-            name: (quantity, unit)
-            for name, quantity, unit in db.execute("SELECT item_name, quantity, unit FROM inventory")
-        }
+        stock = {name for (name,) in db.execute("SELECT item_name FROM inventory")}
         for name, _, _ in items:
             if name not in stock:
                 raise UnknownInventoryItem(name)
 
         changes = []
-        for name, qty, action in items:
-            before, unit = stock[name]
+        for name, value, action in items:
+            before_qty, before_price, unit = db.execute(
+                "SELECT quantity, price_per_unit, unit FROM inventory WHERE item_name = ?", (name,)
+            ).fetchone()
             if action == "SELL":
                 db.execute(
                     "UPDATE inventory SET quantity = MAX(0, quantity - ?), units_sold = units_sold + ? WHERE item_name = ?",
-                    (qty, qty, name),
+                    (value, value, name),
                 )
+            elif action == "ADD":
+                db.execute("UPDATE inventory SET quantity = quantity + ? WHERE item_name = ?", (value, name))
             else:
-                db.execute("UPDATE inventory SET quantity = quantity + ? WHERE item_name = ?", (qty, name))
-            after, sold = db.execute("SELECT quantity, units_sold FROM inventory WHERE item_name = ?", (name,)).fetchone()
+                db.execute("""
+                    UPDATE inventory
+                    SET price_per_unit = :price,
+                        cost_price = CASE WHEN cost_price > :price THEN
+                            CASE WHEN price_per_unit > cost_price THEN (cost_price / price_per_unit) * :price
+                                 ELSE :price END
+                            ELSE cost_price END
+                    WHERE item_name = :name
+                """, {"price": value, "name": name})
+            after_qty, after_price, sold = db.execute(
+                "SELECT quantity, price_per_unit, units_sold FROM inventory WHERE item_name = ?", (name,)
+            ).fetchone()
+            before, after = (before_price, after_price) if action == "UPDATE_PRICE" else (before_qty, after_qty)
             if not math.isfinite(after) or not math.isfinite(sold):
                 raise ValueError("Inventory total exceeds the supported range")
             changes.append(StockChange(name, before, after, unit))
-            stock[name] = (after, unit)
         return changes
 
 
@@ -113,7 +134,7 @@ def update_inventory_stock(item_name: str, qty: float, is_sale: bool):
 def execute_analytics_query(sql: str) -> list[dict]:
     """Execute a read-only authorized SELECT query and return chart rows with units."""
     with closing(sqlite3.connect(DB_PATH)) as db, db:
-        columns = {"item_name", "quantity", "unit", "price", "units_sold", ""}
+        columns = {"item_name", "quantity", "unit", "price", "price_per_unit", "units_sold", ""}
         reads_inventory = False
 
         def authorize(action, table, column, schema, source):
