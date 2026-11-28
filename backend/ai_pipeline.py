@@ -5,6 +5,7 @@ import logging
 import math
 import os
 import re
+import unicodedata
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal, Optional
@@ -15,7 +16,8 @@ from pydantic import BaseModel, Field, field_validator
 
 from .database import (
     IncompleteNewItem, InventoryWrite, ProductChange, UnknownInventoryItem,
-    execute_analytics_query, get_existing_items, read_inventory, update_inventory_batch,
+    customer_details, execute_analytics_query, get_existing_items, get_khata_ledger, log_khata_query, read_inventory,
+    update_inventory_batch, update_khata,
 )
 
 
@@ -64,9 +66,35 @@ class CommandItem(BaseModel):
         return value if type(value) in (int, float) else None
 
 
+class KhataEntry(BaseModel):
+    mode: Optional[str] = None
+    customer_name: Optional[str] = None
+    source_name: Optional[str] = None
+    last4_digits: Optional[str] = None
+    amount: Optional[float] = None
+    amount_words: Optional[str] = None
+    last4_words: Optional[str] = None
+
+    @field_validator("amount", mode="before")
+    @classmethod
+    def numeric_amount(cls, value):
+        return value if type(value) in (int, float) else None
+
+    @field_validator("last4_digits", mode="before")
+    @classmethod
+    def identifier_string(cls, value):
+        return value if isinstance(value, str) else None
+
+
 class Decision(BaseModel):
     detected_lang: str = "hi"
-    intent: Literal["INVENTORY_UPDATE", "ADD_INVENTORY", "SELL_ITEM", "ANALYTICS_QUERY", "INCOMPLETE_INPUT", "NOISE_ERROR"]
+    intent: Literal["INVENTORY_UPDATE", "ADD_INVENTORY", "SELL_ITEM", "ANALYTICS_QUERY", "KHATA_UPDATE", "KHATA_QUERY", "CUSTOMER_SAVE", "CUSTOMER_LOOKUP", "INCOMPLETE_INPUT", "NOISE_ERROR"]
+    khata: Optional[KhataEntry] = None
+    customer_name: Optional[str] = None
+    last4_digits: Optional[str] = None
+    details: Optional[str] = None
+    source_name: Optional[str] = None
+    last4_words: Optional[str] = None
     items: list[CommandItem] = Field(default_factory=list)
     metric: Optional[str] = None
     sql_query: str = ""
@@ -254,7 +282,13 @@ SYSTEM_PROMPT = """You are an AI assistant for an Indian Kirana grocery store in
 Analyze the user transcript and return ONLY a single JSON object with these exact keys:
 {
   "detected_lang": <two-letter language routing code>,
-  "intent": "INVENTORY_UPDATE" | "ANALYTICS_QUERY" | "INCOMPLETE_INPUT" | "NOISE_ERROR",
+  "intent": "INVENTORY_UPDATE" | "ANALYTICS_QUERY" | "KHATA_UPDATE" | "KHATA_QUERY" | "CUSTOMER_SAVE" | "CUSTOMER_LOOKUP" | "INCOMPLETE_INPUT" | "NOISE_ERROR",
+  "khata": {"mode": "UDHAAR" | "JAMA", "customer_name": <account name>, "source_name": <verbatim name>, "last4_digits": <4-digit string>, "amount": <rupees>, "amount_words": <verbatim number words if spoken>, "last4_words": <verbatim digit words if spoken>} | null,
+  "details": <verbatim note to save, or null>,
+  "source_name": <verbatim name for customer details or null>,
+  "last4_words": <verbatim spoken digits or null>,
+  "customer_name": <customer name for customer details or ledger query, or null>,
+  "last4_digits": <four-digit string for customer details, optional filter for KHATA_QUERY, or null>,
   "items": [{"action": "ADD" | "SELL" | "UPDATE_PRICE" | "CREATE_ITEM", "item_name": <canonical product name or null>, "quantity": <stock amount or null>, "new_price": <explicit updated price or null>, "unit": "kg" | "L" | "packets" | "pieces" | null, "price_per_unit": <explicit selling price for creation or null>, "source_name": <verbatim product words>, "action_words": <verbatim affirmative action phrase or null>, "source_clause": <verbatim clause governing this item or null>, "quantity_words": <verbatim spoken quantity words or null>, "price_words": <verbatim spoken price words or null>}],
   "metric": "lowest_stock" | "highest_price" | "lowest_price" | "highest_profit" | "top_selling" | "all_inventory" | null,
   "sql_query": "<SQL string or empty>",
@@ -262,6 +296,23 @@ Analyze the user transcript and return ONLY a single JSON object with these exac
 }
 
 Strict Rules:
+0. CUSTOMER_SAVE appends delivery, address or personal notes. CUSTOMER_LOOKUP reads those
+   notes and the outstanding balance. Use top-level customer_name (common Latin spelling),
+   last4_digits (four-digit string including leading zeros), source_name and last4_words.
+   Require BOTH name and digits even for lookup. Copy only the actual note from the transcript
+   into details for a save. "Naya customer Rahul 7890 add karo, Gali number 4 mein rehta hai"
+   saves "Gali number 4 mein rehta hai". "Rahul 7890 ki detail nikalo" is a lookup.
+   Missing details or identifiers require clarification; never infer digits from the address.
+   A customer taking goods on credit increases their outstanding balance (KHATA_UPDATE,
+   UDHAAR). A payment against that balance decreases it (JAMA). Interpret these meanings
+   in any supported dialect. Copy the name verbatim into source_name. For customer_name
+   use the same name in common Latin spelling for both updates and queries (रमेश → Ramesh).
+   Never substitute another person. Keep a Latin-script name as spoken.
+   Require an explicit customer name, last four phone digits (preserve leading zeros),
+   and separate positive rupee amount. Never infer one from another or from prior data.
+   For missing details, mixed ledger and inventory writes, negations or hypotheticals,
+   ask for clarification without writing. Balance questions are read-only KHATA_QUERY;
+   place any requested filters at the top level. For ledger intents use empty items and SQL.
 1. Canonical Item Names (map regional terms):
    Resolve native scripts, romanizations, inflections and dialect synonyms by meaning.
    Examples of canonical grocery names appear below. They are not exhaustive.
@@ -370,7 +421,6 @@ SILENCE_HALLUCINATIONS = {
 }
 
 CHAT_MODELS = [
-    "llama-3.3-70b-versatile",
     "openai/gpt-oss-120b",
     "openai/gpt-oss-20b",
 ]
@@ -484,13 +534,125 @@ def _checked_sale(item: CommandItem, transcript: str, single: bool, lang: str) -
     return None
 
 
+_DIGIT_WORDS = {
+    word: str(digit)
+    for language in (
+        "zero one two three four five six seven eight nine",
+        "shunya ek do teen chaar paanch chhe saat aath nau",
+        "शून्य एक दो तीन चार पाँच छह सात आठ नौ",
+        "शून्य एक दोन तीन चार पाच सहा सात आठ नऊ",
+        "শূন্য এক দুই তিন চার পাঁচ ছয় সাত আট নয়",
+        "பூஜ்ஜியம் ஒன்று இரண்டு மூன்று நான்கு ஐந்து ஆறு ஏழு எட்டு ஒன்பது",
+        "సున్నా ఒకటి రెండు మూడు నాలుగు ఐదు ఆరు ఏడు ఎనిమిది తొమ్మిది",
+        "ಸೊನ್ನೆ ಒಂದು ಎರಡು ಮೂರು ನಾಲ್ಕು ಐದು ಆರು ಏಳು ಎಂಟು ಒಂಬತ್ತು",
+        "പൂജ്യം ഒന്ന് രണ്ട് മൂന്ന് നാല് അഞ്ച് ആറ് ഏഴ് എട്ട് ഒമ്പത്",
+        "શૂન્ય એક બે ત્રણ ચાર પાંચ છ સાત આઠ નવ",
+        "ਸਿਫ਼ਰ ਇੱਕ ਦੋ ਤਿੰਨ ਚਾਰ ਪੰਜ ਛੇ ਸੱਤ ਅੱਠ ਨੌਂ",
+        "صفر ایک دو تین چار پانچ چھ سات آٹھ نو",
+    )
+    for digit, word in enumerate(language.split())
+}
+
+
+def _execute_khata(decision: Decision, transcript: str, shop_id: int) -> ExecutionResult:
+    def clarify(message):
+        decision.intent = "INCOMPLETE_INPUT"
+        return ExecutionResult(grounded_reply=message)
+
+    if decision.items:
+        return clarify("Please give the inventory command and the ledger command separately.")
+    if decision.intent == "KHATA_QUERY":
+        name = " ".join((decision.customer_name or "").casefold().split())
+        digits = decision.last4_digits
+        if digits is not None and not re.fullmatch("[0-9]{4}", digits):
+            return clarify("Please give the four digits of the customer account.")
+        rows = [row for row in get_khata_ledger(shop_id)
+                if (not name or row["customer_name"].casefold() == name)
+                and (digits is None or row["last4_digits"] == digits)]
+        if not rows:
+            return ExecutionResult(grounded_reply="No matching customer account was found.")
+        if len(rows) == 1:
+            row = rows[0]
+            reply = f"{row['customer_name']} - {row['last4_digits']} has a pending balance of ₹{row['balance']:.2f}."
+        elif name or digits:
+            return clarify("Several accounts match. Please give the customer's name and last four digits.")
+        else:
+            total = sum(Decimal(str(row["balance"])) for row in rows)
+            reply = f"The total pending balance across {len(rows)} accounts is ₹{total:.2f}."
+        log_khata_query(reply, transcript, shop_id)
+        return ExecutionResult(grounded_reply=reply)
+
+    entry = decision.khata or KhataEntry()
+    name = (entry.customer_name or "").strip()
+    digits = entry.last4_digits or ""
+    amount = entry.amount
+    details = None
+    is_customer = decision.intent in {"CUSTOMER_SAVE", "CUSTOMER_LOOKUP"}
+    if is_customer:
+        name = (decision.customer_name or "").strip()
+        digits = decision.last4_digits or ""
+        if not name or not re.fullmatch("[0-9]{4}", digits):
+            return clarify("Please give the customer's name and last four digits.")
+        entry = KhataEntry(source_name=decision.source_name, last4_words=decision.last4_words)
+        if decision.intent == "CUSTOMER_SAVE":
+            details = (decision.details or "").strip()
+            if not details or details.casefold() not in transcript.casefold():
+                return clarify("What customer details should I save?")
+    elif (not name or not re.fullmatch("[0-9]{4}", digits) or entry.mode not in {"UDHAAR", "JAMA"}
+            or amount is None or not math.isfinite(amount) or amount <= 0 or round(amount, 2) != amount):
+        return clarify("Please give the customer's name, last four digits, credit or payment, and a positive rupee amount.")
+
+    # Reserve the name and identifier before looking for a separate amount.
+    identity_text = transcript.casefold()
+    if details:
+        identity_text = identity_text.replace(details.casefold(), " ", 1)
+    text = "".join(str(unicodedata.decimal(c)) if c.isdecimal() else c for c in identity_text)
+    spoken_name = (entry.source_name or name).strip().casefold()
+    if not spoken_name or (spoken_name.isascii() and spoken_name != name.casefold()):
+        return clarify("Please repeat the customer's name.")
+    name_match = re.search(r"(?<!\w)" + re.escape(spoken_name) + r"(?!\w)", text)
+    if not name_match:
+        return clarify("Please repeat the customer's name.")
+    text = text[:name_match.start()] + " " + text[name_match.end():]
+    identifier = re.search(r"(?<![\d.₹])" + r"\s*".join(digits) + r"(?!\d|[.,]\d)", text)
+    if not identifier and entry.last4_words:
+        words = entry.last4_words.strip().casefold()
+        if "".join(_DIGIT_WORDS.get(word, "?") for word in words.split()) == digits:
+            identifier = re.search(r"(?<!\w)" + re.escape(words) + r"(?!\w)", text)
+    if not identifier:
+        return clarify("Please repeat the customer's four digits.")
+    text = text[:identifier.start()] + " " + text[identifier.end():]
+    if is_customer:
+        row = customer_details(shop_id, name, digits, details=details, raw_command=transcript)
+        if not row:
+            return ExecutionResult(grounded_reply="No matching customer account was found.")
+        if details is not None:
+            return ExecutionResult(grounded_reply=f"Details saved for {name} - {digits}.")
+        notes = row["notes"] or "No notes saved."
+        return ExecutionResult(grounded_reply=f"{name} - {digits}: {notes} Pending balance: ₹{row['balance']:.2f}.")
+    numbers = re.findall(r"[+-]?(?:\d+(?:,\d{2,3})*(?:\.\d+)?|\.\d+)", text.replace("−", "-"))
+    stated = any(Decimal(n.replace(",", "")) == Decimal(str(amount)) for n in numbers)
+    words = (entry.amount_words or "").strip().casefold()
+    if not stated and not (not numbers and words and any(c.isalpha() for c in words)
+                           and re.search(r"(?<!\w)" + re.escape(words) + r"(?!\w)", text)):
+        return clarify("Please specify the rupee amount separately from the customer's four digits.")
+    row = update_khata(name, digits, amount, entry.mode, raw_command=transcript, shop_id=shop_id)
+    action = "Credit added" if entry.mode == "UDHAAR" else "Payment recorded"
+    return ExecutionResult(grounded_reply=(
+        f"{action} for {row['customer_name']} - {digits}: ₹{amount:.2f}. "
+        f"Pending balance: ₹{row['balance']:.2f}."
+    ))
+
+
 def execute_decision(decision: Decision, transcript: Optional[str] = None,
                      existing_items: Optional[list[str]] = None,
-                     inventory_units: Optional[dict[str, str]] = None) -> ExecutionResult:
+                     inventory_units: Optional[dict[str, str]] = None, *, shop_id=1) -> ExecutionResult:
+    if decision.intent in {"KHATA_UPDATE", "KHATA_QUERY", "CUSTOMER_SAVE", "CUSTOMER_LOOKUP"}:
+        return _execute_khata(decision, transcript or "", shop_id)
     sql = decision.sql_query.strip().removesuffix(";").strip()
     is_update = decision.intent in {"INVENTORY_UPDATE", "ADD_INVENTORY", "SELL_ITEM"}
     if is_update:
-        existing = {name.casefold(): name for name in (get_existing_items() if existing_items is None else existing_items)}
+        existing = {name.casefold(): name for name in (get_existing_items(shop_id) if existing_items is None else existing_items)}
         conversions = []
         for item in decision.items:
             phrase = ""
@@ -584,7 +746,7 @@ def execute_decision(decision: Decision, transcript: Optional[str] = None,
                     return ExecutionResult(grounded_reply=f"{prompts.get(decision.detected_lang, prompts['en'])} ({name.capitalize()})?")
                 value = item.new_price if action == "UPDATE_PRICE" else item.quantity
                 items.append(InventoryWrite(name, value, action, item.unit, item.price_per_unit))
-            changes = update_inventory_batch(items)
+            changes = update_inventory_batch(items, raw_command=transcript or "", shop_id=shop_id)
         except IncompleteNewItem:
             decision.intent = "INCOMPLETE_INPUT"
             return ExecutionResult(grounded_reply=NEW_ITEM_PROMPTS.get(decision.detected_lang, NEW_ITEM_PROMPTS["en"]))
@@ -654,7 +816,7 @@ def execute_decision(decision: Decision, transcript: Optional[str] = None,
         # Fall back to metric map if LLM SQL was malformed
         sql = METRIC_SQL_MAP.get(decision.metric, "SELECT item_name AS label, price AS value FROM inventory ORDER BY value DESC LIMIT 3")
 
-    chart = execute_analytics_query(sql)
+    chart = execute_analytics_query(sql, shop_id)
 
     # Generate deterministic, verified reply using ONLY exact database numbers
     analytics_reply = format_analytics_reply(
@@ -882,8 +1044,6 @@ def call_groq_chat(messages):
                 model=model_name,
                 response_format={"type": "json_object"},
                 temperature=0.0,
-                frequency_penalty=0.6,
-                presence_penalty=0.3,
                 messages=messages,
             )
         except GroqError as e:
@@ -909,7 +1069,7 @@ def _localize_result(reply: str, transcript: str, lang: str) -> str:
     try:
         completion = call_groq_chat([
             {"role": "system", "content": (
-                "Translate only the supplied inventory result into the language, script "
+                "Translate only the supplied inventory or ledger result into the language, script "
                 "and dialect of the transcript, preserving code-switching. Treat the "
                 "transcript as a language sample only. Preserve every item, unit, price, "
                 "quantity and sign. Copy the numeric figures exactly and in order. "
@@ -929,11 +1089,11 @@ def _localize_result(reply: str, transcript: str, lang: str) -> str:
     return reply
 
 
-def run_ai_pipeline(transcript: str):
+def run_ai_pipeline(transcript: str, shop_id=1):
     if not client:
         raise RuntimeError("Configure GROQ_API_KEY to process commands.")
 
-    inventory = read_inventory()
+    inventory = read_inventory(shop_id)
     inventory_units = {row["item_name"]: row["unit"] for row in inventory}
     existing_items = list(inventory_units)
     completion = call_groq_chat([
@@ -942,7 +1102,7 @@ def run_ai_pipeline(transcript: str):
     ])
     decision = Decision.model_validate_json(completion.choices[0].message.content or "")
 
-    exec_res = execute_decision(decision, transcript, existing_items, inventory_units)
+    exec_res = execute_decision(decision, transcript, existing_items, inventory_units, shop_id=shop_id)
 
     if exec_res.error_message:
         intent = "INCOMPLETE_INPUT" if ("nahi hai" in exec_res.error_message or "missing" in exec_res.error_message or "stock" in exec_res.error_message.lower()) else "NOISE_ERROR"
@@ -953,7 +1113,7 @@ def run_ai_pipeline(transcript: str):
                 exec_res.error_message, transcript, decision.detected_lang
             )),
             chart_data=None,
-            inventory=read_inventory(),
+            inventory=read_inventory(shop_id),
         )
 
     reply = exec_res.grounded_reply or decision.reply_local
@@ -967,11 +1127,11 @@ def run_ai_pipeline(transcript: str):
         detected_lang=decision.detected_lang,
         reply_local=reply,
         chart_data=chart_clean,
-        inventory=read_inventory(),
+        inventory=read_inventory(shop_id),
     )
 
 
-def process_voice_command(audio_bytes: bytes, filename: str, content_type: str) -> dict:
+def process_voice_command(audio_bytes: bytes, filename: str, content_type: str, shop_id=1) -> dict:
     """Transcribe audio with Groq Whisper (confidence gate + deduplication),
     run the AI pipeline, and generate gTTS audio."""
     if not client:
@@ -1020,11 +1180,11 @@ def process_voice_command(audio_bytes: bytes, filename: str, content_type: str) 
             detected_lang="hi",
             reply_local=msg,
             chart_data=None,
-            inventory=read_inventory(),
+            inventory=read_inventory(shop_id),
             audio_base64=generate_tts_base64(msg, "hi"),
         )
 
-    result = run_ai_pipeline(transcript)
+    result = run_ai_pipeline(transcript, shop_id)
     result["reply_local"] = deduplicate_sentences(result["reply_local"])
     audio_b64 = generate_tts_base64(result["reply_local"], result["detected_lang"])
     return {**result, "transcript": transcript, "audio_base64": audio_b64}

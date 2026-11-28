@@ -4,8 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>VoxMetrics – Kirana Voice Assistant</title>
-  <link rel="stylesheet" href="./style.css" />
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="./style.css?v=5" />
+  <script async id="chartLibrary" src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </head>
 <body>
 
@@ -20,16 +20,122 @@
         <span class="topbar-sub">Kirana Voice Assistant</span>
       </div>
     </div>
+    <div class="counter-controls" id="counterControls" hidden>
     <div class="status-badge" id="statusBadge">
       <span class="status-dot"></span>
       <span class="status-label">Ready</span>
     </div>
+    <button class="lock-button" id="lockCounter" type="button">Lock Counter</button>
+    </div>
   </header>
 
   <!-- ═══════════════════════════════════════════
-       MAIN LAYOUT
+       AUTH GATE
   ═══════════════════════════════════════════ -->
-  <main class="main-wrap">
+  <div class="auth-bg" id="authGate" aria-labelledby="authTitle">
+    <section class="auth-card" role="main">
+
+      <!-- Brand badge -->
+      <div class="auth-brand">
+        <div class="auth-lock-icon" aria-hidden="true">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="5" y="11" width="14" height="10" rx="2.5" fill="#16a34a"/>
+            <path d="M8 11V7a4 4 0 0 1 8 0v4" stroke="#16a34a" stroke-width="2" stroke-linecap="round"/>
+            <circle cx="12" cy="16" r="1.5" fill="white"/>
+          </svg>
+        </div>
+        <h1 class="auth-heading" id="authTitle">Unlock Your Counter</h1>
+        <p class="auth-sub">Secure voice billing &amp; khata access for your kirana store</p>
+      </div>
+
+      <!-- Mode tab switcher -->
+      <div class="auth-tabs" role="tablist">
+        <button type="button" id="ownerTab" aria-pressed="true" role="tab">Owner Login</button>
+        <button type="button" id="signupTab" aria-pressed="false" role="tab">New Store Signup</button>
+      </div>
+
+      <!-- ── Owner Login Form ── -->
+      <form id="ownerForm" novalidate>
+        <div class="form-field">
+          <label class="field-label" for="owner-phone">Phone number</label>
+          <input class="field-input" id="owner-phone" name="phone" type="tel"
+                 autocomplete="username" maxlength="10" pattern="[0-9]{10}"
+                 placeholder="10-digit mobile number" required>
+        </div>
+
+        <div class="form-field">
+          <label class="field-label" for="owner-password">Password</label>
+          <div class="input-wrap">
+            <input class="field-input" id="owner-password" name="password" type="password"
+                   autocomplete="current-password" placeholder="Enter your password" required>
+            <button type="button" class="eye-toggle" aria-label="Show password" data-target="owner-password">
+              <svg class="eye-icon eye-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              <svg class="eye-icon eye-closed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <button class="cta-btn" type="submit">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2" fill="currentColor" opacity=".25"/><path d="M8 11V7a4 4 0 0 1 8 0v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="16" r="1.5" fill="currentColor"/></svg>
+          Unlock Counter
+        </button>
+
+        <!-- Demo divider -->
+        <div class="demo-divider"><span>or test instantly</span></div>
+        <div class="demo-box">
+          <p class="demo-hint">Use our pre-loaded demo store to explore all features instantly.</p>
+          <button class="demo-button" type="button" id="fillDemo">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 2L2 7l10 5 10-5-10-5z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M2 17l10 5 10-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M2 12l10 5 10-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Fill Demo Store&ensp;·&ensp;<code>9876543210 / 1234</code>
+          </button>
+        </div>
+      </form>
+
+      <!-- ── Signup Form ── -->
+      <form id="signupForm" hidden novalidate>
+        <div class="form-field">
+          <label class="field-label" for="signup-phone">Store phone number</label>
+          <input class="field-input" id="signup-phone" name="phone" type="tel"
+                 autocomplete="tel-national" maxlength="10" pattern="[0-9]{10}"
+                 placeholder="10-digit mobile number" required>
+        </div>
+
+        <label hidden id="otpStep" class="form-field">
+          <span class="field-label">4-digit OTP</span>
+          <input class="field-input otp-input" name="otp" inputmode="numeric"
+                 autocomplete="one-time-code" maxlength="4" pattern="[0-9]{4}"
+                 placeholder="· · · ·">
+        </label>
+
+        <div hidden id="passwordStep" class="password-step-fields">
+          <div class="form-field">
+            <label class="field-label" for="signup-shopname">Shop name</label>
+            <input class="field-input" id="signup-shopname" name="shop_name"
+                   autocomplete="organization" maxlength="100" placeholder="e.g. Sharma General Store">
+          </div>
+          <div class="form-field">
+            <label class="field-label" for="signup-password">Set password</label>
+            <div class="input-wrap">
+              <input class="field-input" id="signup-password" name="password" type="password"
+                     autocomplete="new-password" maxlength="256" placeholder="Create a secure password">
+              <button type="button" class="eye-toggle" aria-label="Show password" data-target="signup-password">
+                <svg class="eye-icon eye-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                <svg class="eye-icon eye-closed" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <button class="cta-btn" type="submit" id="signupNext">Send OTP</button>
+      </form>
+
+      <!-- Feedback & OTP toast -->
+      <p id="authFeedback" class="auth-feedback" role="alert"></p>
+      <div id="smsToast" class="sms-toast" role="status" hidden></div>
+
+    </section>
+  </div>
+  <main class="main-wrap" id="dashboard" hidden>
 
     <!-- ─── VOICE CONTROL CARD ─────────────────── -->
     <section class="card voice-card">
@@ -72,6 +178,7 @@
         <button class="pill" data-cmd="10 packet mattha add karo">10 packet mattha add karo</button>
         <button class="pill" data-cmd="Innaki highest profit entha item?">Innaki highest profit entha item?</button>
         <button class="pill" data-cmd="Add sugar">Add sugar</button>
+        <button class="pill" data-cmd="Ramesh 4521 ke naam 350 udhaar likho">Ramesh 4521 ke naam 350 udhaar likho</button>
         <button class="pill pill--noise" data-cmd="asdfghj noise test">asdfghj noise test</button>
       </div>
     </section>
@@ -90,44 +197,93 @@
       <div class="user-audio-wrap" id="userAudioWrap" style="display: none;"></div>
     </section>
 
-    <!-- ─── DATA SECTION ───────────────────────── -->
-    <div class="data-row">
+    <!-- ─── VIEW TAB NAV ──────────────────────── -->
+    <nav class="view-tabs" role="tablist" aria-label="Dashboard views">
+      <button class="view-tab view-tab--active" id="tab-inventory" role="tab"
+              aria-selected="true" aria-controls="view-inventory">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
+        </svg>
+        Inventory &amp; Profit
+      </button>
+      <button class="view-tab" id="tab-khata" role="tab"
+              aria-selected="false" aria-controls="view-khata">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
+          <path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+        </svg>
+        Udhaar Khata &amp; Customers
+        <span class="view-tab-badge" id="khataBadge" hidden>0</span>
+      </button>
+    </nav>
 
-      <!-- Inventory Table Card -->
-      <section class="card table-card">
+    <!-- ─── VIEW: INVENTORY & PROFIT ──────────── -->
+    <section id="view-inventory" role="tabpanel" aria-labelledby="tab-inventory">
+      <div class="data-row">
+
+        <!-- Inventory Table Card -->
+        <section class="card table-card">
+          <div class="card-header">
+            <h2 class="card-title">Inventory</h2>
+            <span class="card-hint" id="lastUpdated">Loading…</span>
+          </div>
+          <div class="table-wrap">
+            <table class="inv-table" id="invTable">
+              <thead>
+                <tr>
+                  <th>Item</th>
+                  <th>Stock Qty</th>
+                  <th>Price (₹)</th>
+                  <th>Units Sold</th>
+                </tr>
+              </thead>
+              <tbody id="invBody">
+                <tr><td colspan="4" class="table-loading">Loading inventory…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- Profit Chart Card -->
+        <section class="card chart-card">
+          <div class="card-header">
+            <h2 class="card-title">Item-wise Profit</h2>
+            <span class="card-hint">price × units sold</span>
+          </div>
+          <div class="chart-wrap">
+            <canvas id="profitChart"></canvas>
+          </div>
+        </section>
+
+      </div><!-- /data-row -->
+    </section><!-- /view-inventory -->
+
+    <!-- ─── VIEW: UDHAAR KHATA & ACTIVITY ─────── -->
+    <section id="view-khata" hidden role="tabpanel" aria-labelledby="tab-khata">
+
+      <section class="card">
         <div class="card-header">
-          <h2 class="card-title">Inventory</h2>
-          <span class="card-hint" id="lastUpdated">Loading…</span>
+          <h2 class="card-title">Voice Udhaar Khata</h2>
+          <input class="ledger-search" type="search" id="customerSearch"
+                 aria-label="Search customers by name, last four digits, or notes"
+                 placeholder="Search customers or notes">
         </div>
         <div class="table-wrap">
-          <table class="inv-table" id="invTable">
-            <thead>
-              <tr>
-                <th>Item</th>
-                <th>Stock Qty</th>
-                <th>Price (₹)</th>
-                <th>Units Sold</th>
-              </tr>
-            </thead>
-            <tbody id="invBody">
-              <tr><td colspan="4" class="table-loading">Loading inventory…</td></tr>
-            </tbody>
+          <table class="inv-table khata-table">
+            <thead><tr><th>Customer (Name - Last 4)</th><th>Pending Balance (₹)</th><th>Last Updated</th><th>Reminder</th></tr></thead>
+            <tbody id="khataBody"><tr><td colspan="4" class="table-loading">Loading ledger…</td></tr></tbody>
           </table>
         </div>
       </section>
 
-      <!-- Profit Chart Card -->
-      <section class="card chart-card">
-        <div class="card-header">
-          <h2 class="card-title">Item-wise Profit</h2>
-          <span class="card-hint">price × units sold</span>
-        </div>
-        <div class="chart-wrap">
-          <canvas id="profitChart"></canvas>
-        </div>
+      <section class="card">
+        <div class="card-header"><h2 class="card-title">Live Voice Activity Log</h2></div>
+        <ol class="activity-log" id="activityLog"><li>Loading activity…</li></ol>
       </section>
 
-    </div><!-- /data-row -->
+    </section><!-- /view-khata -->
 
   </main>
 
@@ -135,6 +291,21 @@
     <span>VoxMetrics &copy; 2026 &mdash; Multilingual Voice Copilot for Kirana Stores</span>
   </footer>
 
-  <script src="./app.js"></script>
+  <!-- Eye-toggle for password visibility (auth card only, no app.js changes needed) -->
+  <script>
+    document.addEventListener('click', function(e) {
+      const btn = e.target.closest('.eye-toggle');
+      if (!btn) return;
+      const targetId = btn.dataset.target;
+      const input = document.getElementById(targetId);
+      if (!input) return;
+      const isPassword = input.type === 'password';
+      input.type = isPassword ? 'text' : 'password';
+      btn.setAttribute('aria-label', isPassword ? 'Hide password' : 'Show password');
+      btn.querySelector('.eye-open').style.display = isPassword ? 'none' : '';
+      btn.querySelector('.eye-closed').style.display = isPassword ? '' : 'none';
+    });
+  </script>
+  <script src="./app.js?v=4"></script>
 </body>
 </html>

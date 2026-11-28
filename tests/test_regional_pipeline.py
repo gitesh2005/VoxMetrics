@@ -2,11 +2,28 @@ import base64
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+import httpx
+from groq import NotFoundError
 
 from backend import ai_pipeline as pipeline
 
 
 class RegionalPipelineTests(unittest.TestCase):
+    def test_groq_fallback_preserves_khata_prompt_and_json_contract(self):
+        messages = [{"role": "system", "content": pipeline.SYSTEM_PROMPT},
+                    {"role": "user", "content": "Check the ledger"}]
+        error = NotFoundError("model_not_found", body=None, response=httpx.Response(
+            404, request=httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")))
+        with patch.object(pipeline, "client") as client, self.assertLogs("voxmetrics"):
+            create = client.chat.completions.create
+            create.side_effect = [error, "completed"]
+            self.assertEqual(pipeline.call_groq_chat(messages), "completed")
+            for call, model in zip(create.call_args_list, ["openai/gpt-oss-120b", "openai/gpt-oss-20b"], strict=True):
+                self.assertEqual(call.kwargs, dict(model=model, messages=messages, temperature=0.0,
+                                                   response_format={"type": "json_object"}))
+        for intent in ("KHATA_UPDATE", "KHATA_QUERY"):
+            self.assertIn(intent, messages[0]["content"])
+
     def test_voice_routes_and_english_retry(self):
         for code, voice in {**pipeline.GTTS_LANG_MAP, "unlisted": "hi"}.items():
             with self.subTest(code=code), patch("gtts.gTTS") as tts:

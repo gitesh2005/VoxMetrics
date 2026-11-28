@@ -4,27 +4,39 @@
  * Full multilingual voice loop with TTS audio playback.
  * Text commands   → POST /api/process-command
  * Voice commands  → POST /api/voice-command (multipart)
- * Falls back to local mock parsing when opened as file://.
  * ───────────────────────────────────────────────────────────
  */
 
 "use strict";
 
-/* ══════════════════════════════════════════════════════════
-   MOCK DATA STORE
-══════════════════════════════════════════════════════════ */
+let inventory = [];
+let ledgerAccounts = [];
+const tokenKey = "voxmetrics.session";
+const sessionToken = localStorage.getItem(tokenKey);
 
-/** @type {Array<{item:string, unit:string, stock:number, price:number, units_sold:number}>} */
-let inventory = [
-  { item: "curd",    unit: "packets", stock: 60,  price: 20,  units_sold: 25 },
-  { item: "sugar",   unit: "kg",      stock: 100, price: 45,  units_sold: 60 },
-  { item: "milk",    unit: "L",       stock: 60,  price: 22,  units_sold: 50 },
-  { item: "rice",    unit: "kg",      stock: 80,  price: 55,  units_sold: 40 },
-  { item: "tea",     unit: "packets", stock: 30,  price: 180, units_sold: 15 },
-  { item: "lentils", unit: "kg",      stock: 50,  price: 90,  units_sold: 30 },
-  { item: "oil",     unit: "L",       stock: 25,  price: 130, units_sold: 20 },
-  { item: "salt",    unit: "kg",      stock: 70,  price: 18,  units_sold: 55 },
-];
+function lockCounter(revoke = true) {
+  document.getElementById("dashboard").hidden = true;
+  document.getElementById("counterControls").hidden = true;
+  document.getElementById("authGate").hidden = false;
+  if (currentAudio) currentAudio.pause();
+  document.getElementById("userAudioPlayer")?.pause();
+  micStream?.getTracks().forEach(track => track.stop());
+  if (sessionToken === localStorage.getItem(tokenKey)) localStorage.removeItem(tokenKey);
+  if (revoke && sessionToken) {
+    fetch("/api/auth/logout", {method: "POST", headers: {Authorization: "Bearer " + sessionToken},
+                              keepalive: true}).catch(() => {});
+  }
+  location.reload();
+}
+
+async function shopFetch(path, options = {}) {
+  const response = await fetch(path, {...options, headers: {...options.headers, Authorization: "Bearer " + sessionToken}});
+  if (response.status === 401 || sessionToken !== localStorage.getItem(tokenKey)) {
+    lockCounter(false);
+    throw new Error("Counter locked");
+  }
+  return response;
+}
 
 /* Chart instance (Chart.js) */
 let profitChart = null;
@@ -56,19 +68,26 @@ let currentAudio = null;
  * Loads the initial inventory while preserving the UI's local row shape.
  */
 async function fetchInventory() {
-  if (location.protocol === "file:") return inventory;
-
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
   try {
-    const response = await fetch("/api/inventory", {
-      signal: AbortSignal.timeout(3000),
+    const response = await shopFetch("/api/inventory", {
+      cache: "no-store", signal: controller.signal,
     });
-    if (!response.ok) return inventory;
-
-    inventory = inventoryRows(await response.json());
+    const data = await response.json();
+    if (!response.ok || !Array.isArray(data.inventory) || !Array.isArray(data.khata) || !Array.isArray(data.logs)) {
+      throw new Error("Dashboard request failed");
+    }
+    applyDashboard(data);
+    document.querySelector(".topbar-sub").textContent = data.shop_name;
+    return true;
   } catch {
-    // Keep the local inventory when the API is unavailable.
+    renderKhata([], "Could not load the ledger. Refresh to retry.");
+    renderActivity([], "Could not load activity. Refresh to retry.");
+  } finally {
+    clearTimeout(timer);
   }
-  return inventory;
+  return false;
 }
 
 function inventoryRows(rows) {
@@ -77,21 +96,112 @@ function inventoryRows(rows) {
   }));
 }
 
+const ledgerCurrency = new Intl.NumberFormat("en-IN", {style: "currency", currency: "INR"});
+const ledgerTime = new Intl.DateTimeFormat("en-IN", {dateStyle: "medium", timeStyle: "short"});
+
+function applyDashboard(result) {
+  const rows = Array.isArray(result) ? result : result.inventory;
+  if (Array.isArray(rows)) inventory = inventoryRows(rows);
+  ledgerAccounts = Array.isArray(result.khata) ? result.khata : [];
+  filterCustomers();
+  renderActivity(Array.isArray(result.logs) ? result.logs : []);
+}
+
+function formatLedgerTime(timestamp) {
+  const date = new Date(timestamp);
+  return timestamp && Number.isFinite(date.getTime()) ? ledgerTime.format(date) : "—";
+}
+
+function filterCustomers() {
+  const search = document.getElementById("customerSearch").value.trim().toLocaleLowerCase();
+  const rows = ledgerAccounts.filter(row =>
+    [row.customer_name, row.last4_digits, row.notes].some(value => String(value || "").toLocaleLowerCase().includes(search)));
+  renderKhata(rows, search ? "No matching customers." : "No customer accounts yet.");
+  updateKhataBadge();
+}
+
+function renderKhata(accounts, emptyMessage = "No customer accounts yet.") {
+  const body = document.getElementById("khataBody");
+  body.replaceChildren();
+  if (!accounts.length) {
+    const cell = body.insertRow().insertCell();
+    cell.colSpan = 4;
+    cell.textContent = emptyMessage;
+    return;
+  }
+  for (const account of accounts) {
+    const row = body.insertRow();
+    const balance = ledgerCurrency.format(account.balance);
+    const customer = account.customer_name + " - " + account.last4_digits;
+    const identity = row.insertCell();
+    identity.textContent = customer;
+    if (account.notes) {
+      const note = document.createElement("small");
+      note.className = "customer-note";
+      note.textContent = account.notes;
+      identity.append(note);
+    }
+    row.insertCell().textContent = balance;
+    row.insertCell().textContent = formatLedgerTime(account.updated_at);
+    const action = row.insertCell();
+    if (account.balance > 0) {
+      const link = document.createElement("a");
+      const message = `नमस्ते ${account.customer_name} जी, आपके खाते में ${balance} बाकी है। कृपया भुगतान करें। धन्यवाद। Your pending shop balance is ${balance}. Thank you.`;
+      link.href = "https://wa.me/?text=" + encodeURIComponent(message);
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.className = "whatsapp-reminder";
+      link.textContent = "1-Click WhatsApp Reminder";
+      link.setAttribute("aria-label", "Open WhatsApp reminder for " + customer);
+      action.append(link);
+    } else {
+      action.textContent = "Settled";
+    }
+  }
+}
+
+function renderActivity(logs, emptyMessage = "Transactions will appear here.") {
+  const feed = document.getElementById("activityLog");
+  feed.replaceChildren();
+  if (!logs.length) {
+    const empty = document.createElement("li");
+    empty.textContent = emptyMessage;
+    feed.append(empty);
+  }
+  for (const log of logs) {
+    const entry = document.createElement("li");
+    const time = document.createElement("time");
+    time.dateTime = log.created_at;
+    time.textContent = formatLedgerTime(log.created_at);
+    const action = document.createElement("strong");
+    const category = {UDHAAR: "KHATA", JAMA: "KHATA", KHATA_QUERY: "KHATA",
+                      ADD: "STOCK", SELL: "STOCK", CREATE_ITEM: "STOCK", UPDATE_PRICE: "PRICE",
+                      CUSTOMER_SAVE: "CUSTOMER", CUSTOMER_LOOKUP: "CUSTOMER"}[log.action_type] || log.action_type;
+    action.className = "activity-badge";
+    action.textContent = category;
+    action.title = log.action_type;
+    if (category !== log.action_type) entry.setAttribute("aria-label", log.action_type + " " + log.summary);
+    const summary = document.createElement("span");
+    summary.textContent = log.summary;
+    entry.append(time, action, summary);
+    feed.append(entry);
+  }
+}
+
 async function sendTextCommand(text) {
-  if (location.protocol === "file:") return parseMockCommand(text);
   try {
-    const response = await fetch("/api/process-command", {
+    const response = await shopFetch("/api/process-command", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({transcript: text}),
     });
     const result = await response.json();
-    if (Array.isArray(result.inventory)) inventory = inventoryRows(result.inventory);
+    applyDashboard(result);
     let type = "success";
     if (!response.ok || result.intent === "NOISE_ERROR") type = "danger";
     else if (result.intent === "INCOMPLETE_INPUT") type = "warning";
     return {heard: text, reply: result.reply_local || "Could not process this command.",
-            type, chartData: result.chart_data, audioBase64: result.audio_base64 || ""};
+            type, chartData: result.chart_data, audioBase64: result.audio_base64 || "", intent: result.intent};
   } catch {
     return {heard: text, reply: "Could not reach the command service. Refresh to check the latest inventory.", type: "danger"};
   }
@@ -100,33 +210,19 @@ async function sendTextCommand(text) {
 /**
  * sendAudioBlob(blob)
  * Sends recorded audio to POST /api/voice-command.
- * Falls back to local mock when opened as file://.
  */
 async function sendAudioBlob(blob) {
-  if (location.protocol === "file:") {
-    await delay(600);
-    const demos = [
-      "10 packet mattha add karo",
-      "Innaki highest profit entha item?",
-      "Add sugar",
-      "asdfghj noise test",
-    ];
-    const mockTranscript = demos[Math.floor(Math.random() * demos.length)];
-    const result = parseMockCommand(mockTranscript);
-    return { ...result, heard: mockTranscript + " (voice)" };
-  }
-
   try {
     const formData = new FormData();
     const filename = (blob.type && blob.type.includes("wav")) ? "recording.wav" : "recording.wav";
     formData.append("audio", blob, filename);
 
-    const response = await fetch("/api/voice-command", {
+    const response = await shopFetch("/api/voice-command", {
       method: "POST",
       body: formData,
     });
     const result = await response.json();
-    if (Array.isArray(result.inventory)) inventory = inventoryRows(result.inventory);
+    applyDashboard(result);
 
     let type = "success";
     if (!response.ok || result.intent === "NOISE_ERROR") type = "danger";
@@ -138,6 +234,7 @@ async function sendAudioBlob(blob) {
       type,
       chartData: result.chart_data,
       audioBase64: result.audio_base64 || "",
+      intent: result.intent,
     };
   } catch {
     return {
@@ -147,100 +244,6 @@ async function sendAudioBlob(blob) {
     };
   }
 }
-
-/* ══════════════════════════════════════════════════════════
-   MOCK COMMAND PARSER
-══════════════════════════════════════════════════════════ */
-
-/**
- * Parses multilingual (Hindi/Telugu/English) add & query commands.
- * Returns a response object consumed by showResponse().
- */
-function parseMockCommand(text) {
-  const t = text.trim();
-  const lower = t.toLowerCase();
-
-  // ── Noise / Unrecognised ──────────────────────────────
-  if (/^[^a-zA-Z\u0900-\u097F\u0C00-\u0C7F\s]+$/.test(t) || lower.includes("noise test")) {
-    return {
-      heard: t,
-      reply: "Could not understand the command. Please speak clearly or rephrase.",
-      type: "danger",
-    };
-  }
-
-  // ── Highest-profit query ──────────────────────────────
-  if (/highest profit|profit entha|most profit/.test(lower)) {
-    if (!inventory.length) {
-      return { heard: t, reply: "The inventory is empty.", type: "warning" };
-    }
-    const best = inventory.reduce((a, b) =>
-      b.price * b.units_sold > a.price * a.units_sold ? b : a
-    );
-    const profit = (best.price * best.units_sold).toLocaleString("en-IN");
-    return {
-      heard: t,
-      reply: `Highest profit item today is ${capitalise(best.item)} — ₹${profit} profit (${best.units_sold} units × ₹${best.price}).`,
-      type: "success",
-      item: best.item,
-    };
-  }
-
-  // ── ADD command (Hindi/Telugu/English) ───────────────
-  // Patterns: "10 packet mattha add karo" / "Add 5 kg sugar" / "Add sugar"
-  const addMatch =
-    t.match(/^(\d+)\s+(?:packet|kg|litre|liter|unit|pcs|pc|bag|box)?\s*(\w+)\s+(?:add karo|jodo|chalao|add)/i) ||
-    t.match(/^add\s+(\d+)?\s*(\w+)/i);
-
-  if (addMatch) {
-    const qty  = parseInt(addMatch[1]) || null;
-    const rawItem = addMatch[2]?.toLowerCase();
-    const resolved = resolveItem(rawItem);
-
-    const itemRow = inventory.find(row => row.item === resolved);
-    if (!itemRow) {
-      return {
-        heard: t,
-        reply: `Item "${rawItem}" not found in inventory. Please check the item name.`,
-        type: "danger",
-      };
-    }
-
-    // Look up the item's unit for context-aware replies
-    const itemUnit = itemRow.unit;
-
-    if (!qty) {
-      return {
-        heard: t,
-        reply: `Got it — you want to add "${capitalise(resolved)}", but quantity is missing. How many ${itemUnit} of ${capitalise(resolved)} would you like to add?`,
-        type: "warning",
-        item: resolved,
-      };
-    }
-
-    // Mutate mock inventory
-    itemRow.stock += qty;
-
-    return {
-      heard: t,
-      reply: `Added ${qty} ${itemUnit} of ${capitalise(resolved)}. New stock: ${itemRow.stock} ${itemUnit}.`,
-      type: "success",
-      item: resolved,
-      qty,
-    };
-  }
-
-  // ── Fallback ──────────────────────────────────────────
-  return {
-    heard: t,
-    reply: "Command received, but I couldn't parse it fully. Try: 'Add 5 kg sugar' or 'Highest profit item?'",
-    type: "warning",
-  };
-}
-
-/* ══════════════════════════════════════════════════════════
-   UI HELPERS
-══════════════════════════════════════════════════════════ */
 
 /** Render inventory table rows */
 function renderTable(data) {
@@ -263,7 +266,10 @@ function renderChart(data, chartData) {
   const analytics = Array.isArray(chartData);
   document.querySelector(".chart-card .card-title").textContent = analytics ? "Inventory Analytics" : "Item-wise Profit";
   document.querySelector(".chart-card .card-hint").textContent = analytics ? "" : "price × units sold";
-  if (typeof Chart === "undefined") return;
+  if (typeof Chart === "undefined") {
+    document.getElementById("chartLibrary").onload = () => renderChart(data, chartData);
+    return;
+  }
 
   const labels = analytics ? chartData.map(r => r.label) : data.map(r => capitalise(r.item));
   const values = analytics ? chartData.map(r => r.value) : data.map(r => r.price * r.units_sold);
@@ -481,27 +487,6 @@ function setStatus(label, mode /* 'ready' | 'recording' */) {
 }
 
 /* ══════════════════════════════════════════════════════════
-   ITEM RESOLVER (handles alternate names / transliterations)
-══════════════════════════════════════════════════════════ */
-
-const ALIASES = {
-  mattha: "curd", dahi: "curd", curd: "curd",
-  sugar: "sugar", cheeni: "sugar", sakkar: "sugar",
-  milk: "milk", dudh: "milk", paal: "milk",
-  rice: "rice", chawal: "rice", biyam: "rice",
-  tea: "tea", chai: "tea",
-  lentils: "lentils", dal: "lentils", pappu: "lentils",
-  oil: "oil", tel: "oil", nune: "oil",
-  salt: "salt", namak: "salt", uppu: "salt",
-};
-
-function resolveItem(word) {
-  if (!word) return null;
-  const w = word.toLowerCase().trim();
-  return ALIASES[w] || null;
-}
-
-/* ══════════════════════════════════════════════════════════
    MICROPHONE / PCM AUDIO RECORDING & WAV ENCODING
 ══════════════════════════════════════════════════════════ */
 
@@ -678,6 +663,7 @@ async function stopRecording() {
     // Refresh table & chart after potential inventory mutation
     renderTable(inventory);
     renderChart(inventory, res.chartData);
+    autoSwitchView(res.intent);
   } finally {
     setControlsDisabled(false);
     setStatus("Ready", "ready");
@@ -797,6 +783,7 @@ function wireEvents() {
 
       renderTable(inventory);
       renderChart(inventory, res.chartData);
+      autoSwitchView(res.intent);
     } finally {
       setControlsDisabled(false);
       setStatus("Ready", "ready");
@@ -821,6 +808,7 @@ function wireEvents() {
 
         renderTable(inventory);
         renderChart(inventory, res.chartData);
+        autoSwitchView(res.intent);
 
         document.getElementById("textInput").value = "";
       } finally {
@@ -832,10 +820,76 @@ function wireEvents() {
 }
 
 /* ══════════════════════════════════════════════════════════
+   VIEW TAB SWITCHING
+══════════════════════════════════════════════════════════ */
+
+const VIEW_TAB_KEY = "voxmetrics.activeView";
+
+/**
+ * Switch the visible dashboard panel.
+ * @param {"view-inventory"|"view-khata"} viewId
+ */
+function switchView(viewId) {
+  const views = ["view-inventory", "view-khata"];
+  const tabs  = { "view-inventory": "tab-inventory", "view-khata": "tab-khata" };
+
+  views.forEach(id => {
+    const panel = document.getElementById(id);
+    const tab   = document.getElementById(tabs[id]);
+    if (!panel || !tab) return;
+    const active = id === viewId;
+    panel.hidden = !active;
+    tab.setAttribute("aria-selected", String(active));
+    tab.classList.toggle("view-tab--active", active);
+  });
+
+  try { sessionStorage.setItem(VIEW_TAB_KEY, viewId); } catch {}
+}
+
+/**
+ * Map an intent/action_type string to its natural view.
+ * Returns null if the intent doesn't imply a specific view.
+ * @param {string} intent
+ * @returns {"view-inventory"|"view-khata"|null}
+ */
+function intentToView(intent) {
+  if (!intent) return null;
+  const upper = String(intent).toUpperCase();
+  const khata = ["KHATA_UPDATE", "KHATA_QUERY", "CUSTOMER_SAVE", "CUSTOMER_LOOKUP",
+                 "UDHAAR", "JAMA", "KHATA", "CUSTOMER"];
+  const inv   = ["INVENTORY_UPDATE", "ADD_INVENTORY", "SELL_ITEM", "ANALYTICS_QUERY",
+                 "ADD", "SELL", "CREATE_ITEM", "UPDATE_PRICE", "INVENTORY", "STOCK"];
+  if (khata.some(k => upper.includes(k))) return "view-khata";
+  if (inv.some(k => upper.includes(k)))   return "view-inventory";
+  return null;
+}
+
+/**
+ * Automatically switch view based on command intent.
+ * @param {string} intent
+ */
+function autoSwitchView(intent) {
+  if (!intent) return;
+  const target = intentToView(intent);
+  if (target) switchView(target);
+}
+
+/**
+ * Update the pending-balance count badge on the Khata tab.
+ * Called after every renderKhata update.
+ */
+function updateKhataBadge() {
+  const badge = document.getElementById("khataBadge");
+  if (!badge) return;
+  const count = ledgerAccounts.filter(a => a.balance > 0).length;
+  badge.textContent = count;
+  badge.hidden = count === 0;
+}
+
+/* ══════════════════════════════════════════════════════════
    UTILS
 ══════════════════════════════════════════════════════════ */
 
-const delay = ms => new Promise(r => setTimeout(r, ms));
 const capitalise = s => s ? s.charAt(0).toUpperCase() + s.slice(1) : "";
 const escHtml = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 
@@ -843,11 +897,120 @@ const escHtml = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"
    BOOT
 ══════════════════════════════════════════════════════════ */
 
-async function init() {
-  const data = await fetchInventory();
-  renderTable(data);
-  renderChart(data);
-  wireEvents();
+function wireAuth() {
+  const owner = document.getElementById("ownerForm");
+  const signup = document.getElementById("signupForm");
+  const feedback = document.getElementById("authFeedback");
+  const toast = document.getElementById("smsToast");
+  const next = document.getElementById("signupNext");
+  let expectedOtp = "";
+
+  function selectTab(register) {
+    owner.hidden = register;
+    signup.hidden = !register;
+    signup.reset();
+    expectedOtp = "";
+    signup.phone.readOnly = false;
+    document.getElementById("otpStep").hidden = true;
+    document.getElementById("passwordStep").hidden = true;
+    signup.otp.required = signup.shop_name.required = signup.password.required = false;
+    toast.hidden = true;
+    next.textContent = "Send OTP";
+    feedback.textContent = "";
+    document.getElementById("ownerTab").setAttribute("aria-pressed", String(!register));
+    document.getElementById("signupTab").setAttribute("aria-pressed", String(register));
+  }
+  document.getElementById("ownerTab").onclick = () => selectTab(false);
+  document.getElementById("signupTab").onclick = () => selectTab(true);
+  document.getElementById("fillDemo").onclick = () => {
+    owner.phone.value = "9876543210";
+    owner.password.value = "1234";
+    owner.querySelector("[type=submit]").focus();
+  };
+  async function auth(path, payload) {
+    const response = await fetch("/api/auth/" + path, {method: "POST",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload)});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || "Please try again.");
+    return data;
+  }
+  async function submit(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector("[type=submit]");
+    button.disabled = true;
+    feedback.textContent = "";
+    try {
+      if (form === signup && !expectedOtp) {
+        const data = await auth("send-otp", {phone: signup.phone.value});
+        if (data.is_registered) throw new Error("This number already has a store. Use Owner Login.");
+        expectedOtp = data.otp_demo;
+        toast.textContent = "Demo SMS · Your OTP is " + expectedOtp;
+        toast.hidden = false;
+        signup.phone.readOnly = signup.otp.required = true;
+        document.getElementById("otpStep").hidden = false;
+        next.textContent = "Continue";
+        signup.otp.focus();
+        return;
+      }
+      if (form === signup && document.getElementById("passwordStep").hidden) {
+        if (signup.otp.value !== expectedOtp) throw new Error("Check the four digits in the demo SMS.");
+        document.getElementById("passwordStep").hidden = false;
+        signup.shop_name.required = signup.password.required = true;
+        next.textContent = "Create store";
+        signup.shop_name.focus();
+        return;
+      }
+      const data = await auth(form === owner ? "login" : "register", Object.fromEntries(new FormData(form)));
+      localStorage.setItem(tokenKey, data.token);
+      location.reload();
+    } catch (error) {
+      feedback.textContent = error.message;
+    } finally {
+      button.disabled = false;
+    }
+  }
+  owner.onsubmit = signup.onsubmit = submit;
 }
 
-document.addEventListener("DOMContentLoaded", init);
+async function init() {
+  wireAuth();
+  window.addEventListener("storage", event => {
+    if (event.key === tokenKey || event.key === null) location.reload();
+  });
+  window.addEventListener("pageshow", event => {
+    if (event.persisted && localStorage.getItem(tokenKey) !== sessionToken) location.reload();
+  });
+  if (!sessionToken) return;
+  if (!await fetchInventory()) {
+    document.getElementById("authFeedback").textContent = "Could not open your store. Sign in again or refresh to retry.";
+    return;
+  }
+  document.getElementById("authGate").hidden = true;
+  document.getElementById("counterControls").hidden = false;
+  document.getElementById("dashboard").hidden = false;
+  document.getElementById("lockCounter").onclick = () => lockCounter();
+  document.getElementById("customerSearch").oninput = filterCustomers;
+  renderTable(inventory);
+  renderChart(inventory);
+  wireEvents();
+
+  // ── Wire view tab buttons ──────────────────────────────
+  document.getElementById("tab-inventory").addEventListener("click", () => switchView("view-inventory"));
+  document.getElementById("tab-khata").addEventListener("click",    () => switchView("view-khata"));
+
+  // Restore last active view from sessionStorage (survives F5 but clears on login/logout)
+  try {
+    const saved = sessionStorage.getItem(VIEW_TAB_KEY);
+    if (saved === "view-inventory" || saved === "view-khata") switchView(saved);
+    else switchView("view-inventory");
+  } catch {
+    switchView("view-inventory");
+  }
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", init, {once: true});
+} else {
+  init();
+}

@@ -20,6 +20,7 @@ body {
   background: #F8FAFC;
   color: #0F172A;
   min-height: 100vh;
+  min-height: 100dvh; /* modern browsers: excludes mobile chrome bars */
   display: flex;
   flex-direction: column;
 }
@@ -388,6 +389,402 @@ body {
 /* ── Inventory Table ──────────────────────────── */
 .table-wrap { overflow-x: auto; }
 
+.khata-table { min-width: 570px; }
+.whatsapp-reminder {
+  display: inline-block;
+  padding: .45rem .8rem;
+  border-radius: .5rem;
+  background: #127547;
+  color: white;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.whatsapp-reminder:hover, .whatsapp-reminder:focus-visible { background: #095736; }
+.activity-log {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  max-height: 16rem;
+  overflow-y: auto;
+}
+.activity-log li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: .35rem .8rem;
+  padding: .55rem 0;
+  border-bottom: 1px solid #e2e8f0;
+  font-size: .85rem;
+  overflow-wrap: anywhere;
+}
+.activity-log time { color: #475569; font-variant-numeric: tabular-nums; }
+[hidden] { display: none !important; }
+.counter-controls { display: flex; align-items: center; gap: .75rem; }
+.lock-button { font: inherit; cursor: pointer; border: 1px solid #cbd5e1; border-radius: .5rem; background: white; padding: .5rem .7rem; color: #334155; }
+
+/* ══════════════════════════════════════════════════════════
+   AUTH GATE – Full-page background wrapper
+══════════════════════════════════════════════════════════ */
+
+/*
+  Safety: even if JS forgets to set hidden, dashboard stays hidden
+  until app.js explicitly removes the hidden attribute.
+  The global [hidden] rule (display:none !important) already handles
+  the authGate hide — this rule is a belt-and-suspenders guard.
+*/
+#authGate[hidden] { display: none !important; }
+#dashboard[hidden] { display: none !important; }
+
+.auth-bg {
+  /* flex: 1 so it expands inside the body column-flex to fill viewport */
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 16px;
+  background:
+    radial-gradient(ellipse 70% 60% at 60% 20%, rgba(22,163,74,.07) 0%, transparent 70%),
+    radial-gradient(ellipse 50% 50% at 10% 80%, rgba(99,102,241,.05) 0%, transparent 70%),
+    #f1f5f9;
+}
+
+/* ── Auth Card ───────────────────────────────── */
+.auth-card {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 20px;
+  padding: 36px 32px 32px;
+  width: 100%;
+  max-width: 440px;
+  box-shadow: 0 20px 40px -15px rgba(15, 23, 42, 0.10), 0 4px 16px -4px rgba(15,23,42,0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+/* ── Brand / Lock icon area ──────────────────── */
+.auth-brand {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  margin-bottom: 28px;
+  gap: 10px;
+}
+
+.auth-lock-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%);
+  border: 1px solid #bbf7d0;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 4px 12px rgba(22,163,74,.14);
+}
+
+.auth-heading {
+  font-size: 1.55rem;
+  font-weight: 800;
+  color: #0f172a;
+  letter-spacing: -0.5px;
+  line-height: 1.15;
+  margin: 0;
+}
+
+.auth-sub {
+  font-size: 13px;
+  color: #64748b;
+  line-height: 1.5;
+  max-width: 310px;
+  margin: 0;
+}
+
+/* ── Segmented tab switcher ──────────────────── */
+.auth-tabs {
+  display: flex;
+  background: #f1f5f9;
+  border-radius: 12px;
+  padding: 4px;
+  margin-bottom: 24px;
+  gap: 0;
+  border: none;
+}
+
+.auth-tabs button {
+  flex: 1;
+  font: 600 13.5px/1 'Segoe UI', system-ui, sans-serif;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  color: #64748b;
+  border-radius: 9px;
+  padding: 9px 12px;
+  transition: background 0.18s, color 0.18s, box-shadow 0.18s;
+  white-space: nowrap;
+}
+
+.auth-tabs button[aria-pressed="true"] {
+  background: #ffffff;
+  color: #0f172a;
+  box-shadow: 0 1px 4px rgba(15,23,42,0.10), 0 0 0 1px rgba(15,23,42,0.04);
+}
+
+/* ── Form layout ─────────────────────────────── */
+#ownerForm,
+#signupForm {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* otpStep is a <label> itself, style it like .form-field */
+#otpStep {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.password-step-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.field-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #374151;
+  letter-spacing: 0.1px;
+}
+
+/* ── Inputs ──────────────────────────────────── */
+.field-input {
+  height: 44px;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  padding: 0 14px;
+  font: 14px/1 'Segoe UI', system-ui, sans-serif;
+  color: #0f172a;
+  background: #f8fafc;
+  outline: none;
+  width: 100%;
+  min-width: 0;
+  transition: border-color 0.18s, box-shadow 0.18s, background 0.18s;
+}
+
+.field-input::placeholder { color: #94a3b8; }
+
+.field-input:focus {
+  border-color: #16a34a;
+  background: #ffffff;
+  box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.14);
+}
+
+.field-input:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* OTP input – larger centered digits */
+.otp-input {
+  letter-spacing: 6px;
+  font-size: 20px;
+  font-weight: 700;
+  text-align: center;
+  height: 50px;
+}
+
+/* ── Password eye toggle ──────────────────────── */
+.input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.input-wrap .field-input {
+  padding-right: 44px;
+}
+
+.eye-toggle {
+  position: absolute;
+  right: 12px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #94a3b8;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  transition: color 0.15s;
+}
+
+.eye-toggle:hover { color: #475569; }
+
+.eye-icon {
+  width: 17px;
+  height: 17px;
+  display: block;
+}
+
+/* ── CTA Submit button ───────────────────────── */
+.cta-btn {
+  height: 46px;
+  width: 100%;
+  background: #16a34a;
+  color: #ffffff;
+  border: none;
+  border-radius: 12px;
+  font: 600 15px/1 'Segoe UI', system-ui, sans-serif;
+  cursor: pointer;
+  letter-spacing: 0.2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  transition: background 0.18s, box-shadow 0.18s, transform 0.1s;
+  box-shadow: 0 4px 12px rgba(22,163,74,0.22);
+  margin-top: 4px;
+}
+
+.cta-btn:hover { background: #15803d; box-shadow: 0 6px 16px rgba(22,163,74,.28); }
+.cta-btn:active { background: #166534; transform: scale(0.98); }
+.cta-btn:disabled { opacity: 0.55; cursor: not-allowed; pointer-events: none; }
+
+/* ── Demo divider ────────────────────────────── */
+.demo-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 4px 0;
+}
+
+.demo-divider::before,
+.demo-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: #e2e8f0;
+}
+
+.demo-divider span {
+  font-size: 11px;
+  color: #94a3b8;
+  font-weight: 500;
+  white-space: nowrap;
+  letter-spacing: 0.3px;
+}
+
+/* ── Demo box ────────────────────────────────── */
+.demo-box {
+  background: #f8fafc;
+  border: 1px dashed #cbd5e1;
+  border-radius: 12px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.demo-hint {
+  font-size: 12px;
+  color: #64748b;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.demo-button {
+  font: 600 13px/1 'Segoe UI', system-ui, sans-serif;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 8px 14px;
+  color: #334155;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+
+.demo-button code {
+  font-family: 'Segoe UI Mono', 'Consolas', monospace;
+  font-size: 12px;
+  color: #16a34a;
+  font-weight: 700;
+  background: #f0fdf4;
+  padding: 2px 5px;
+  border-radius: 4px;
+  display: inline;
+}
+
+.demo-button:hover {
+  background: #f1f5f9;
+  border-color: #94a3b8;
+  color: #0f172a;
+}
+
+/* ── Feedback & OTP toast ────────────────────── */
+.auth-feedback {
+  font-size: 13px;
+  line-height: 1.5;
+  border-radius: 10px;
+  padding: 0;
+  margin-top: 0;
+  transition: all 0.2s;
+}
+
+.auth-feedback:not(:empty) {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #991b1b;
+  padding: 10px 14px;
+  margin-top: 4px;
+  font-weight: 500;
+}
+
+.sms-toast {
+  margin-top: 4px;
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  color: #065f46;
+  border-radius: 10px;
+  padding: 12px 16px;
+  font-size: 13.5px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  line-height: 1.4;
+}
+
+.sms-toast::before {
+  content: '📱';
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+/* ── Ledger search ───────────────────────────── */
+.ledger-search {
+  border: 1px solid #94a3b8;
+  border-radius: .5rem;
+  padding: .65rem;
+  font: inherit;
+  min-width: 0;
+  margin-left: auto;
+  max-width: 100%;
+}
+
+/* ── Customer note ───────────────────────────── */
+.customer-note { display: block; font-weight: 400; color: #475569; white-space: pre-line; overflow-wrap: anywhere; }
+.activity-badge { padding: .2rem .5rem; border-radius: .4rem; color: #244969; background: #edf4fa; font-size: .72rem; }
+
 .inv-table {
   width: 100%;
   border-collapse: collapse;
@@ -557,6 +954,94 @@ body {
   background: #FFFFFF;
 }
 
+/* ══════════════════════════════════════════════════════════
+   DASHBOARD VIEW TABS
+══════════════════════════════════════════════════════════ */
+
+/* Tab nav bar — full-width rule between voice area and data */
+.view-tabs {
+  display: flex;
+  gap: 10px;
+  border-bottom: 1px solid #e2e8f0;
+  margin: 20px 0;
+  padding: 0;
+  background: transparent;
+}
+
+/* Individual tab button */
+.view-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 18px;
+  font: 600 13.5px/1 'Segoe UI', system-ui, sans-serif;
+  color: #64748b;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  /* lift the bottom border so it sits on top of the nav border */
+  margin-bottom: -1px;
+  border-radius: 8px 8px 0 0;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+  white-space: nowrap;
+}
+
+.view-tab:hover {
+  color: #0f172a;
+  background: #f8fafc;
+}
+
+/* Active tab — white pill on emerald underline */
+.view-tab--active,
+.view-tab[aria-selected="true"] {
+  color: #16a34a;
+  border-bottom-color: #16a34a;
+  background: #f0fdf4;
+}
+
+/* Badge for pending balance count on khata tab */
+.view-tab-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #dc2626;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0;
+}
+
+/* View panels */
+#view-inventory,
+#view-khata {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* Keep the data-row grid inside view-inventory */
+#view-inventory .data-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+
+@media (max-width: 768px) {
+  #view-inventory .data-row { grid-template-columns: 1fr; }
+}
+
+/* Responsive tweaks for the tab nav itself */
+@media (max-width: 540px) {
+  .view-tab { padding: 9px 12px; font-size: 12.5px; gap: 5px; }
+  .view-tab svg { display: none; }
+}
+
 /* ── Responsive tweaks ────────────────────────── */
 @media (max-width: 540px) {
   .topbar { padding: 0 14px; }
@@ -566,4 +1051,11 @@ body {
   .mic-icon { width: 30px; height: 30px; }
   .text-row { flex-direction: column; }
   .send-btn { width: 100%; }
+
+  /* Auth card mobile */
+  .auth-bg { padding: 20px 12px; align-items: flex-start; padding-top: 32px; }
+  .auth-card { padding: 28px 20px 24px; border-radius: 16px; }
+  .auth-heading { font-size: 1.3rem; }
+  .cta-btn { height: 48px; font-size: 15px; }
+  .demo-button { font-size: 12px; }
 }
