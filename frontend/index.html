@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>VoxMetrics – Kirana Voice Assistant</title>
-  <link rel="stylesheet" href="./style.css?v=5" />
+  <link rel="stylesheet" href="./style.css?v=6" />
   <script async id="chartLibrary" src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -21,11 +21,15 @@
       </div>
     </div>
     <div class="counter-controls" id="counterControls" hidden>
-    <div class="status-badge" id="statusBadge">
-      <span class="status-dot"></span>
-      <span class="status-label">Ready</span>
-    </div>
-    <button class="lock-button" id="lockCounter" type="button">Lock Counter</button>
+      <nav class="topbar-nav" aria-label="Page navigation">
+        <a href="/" class="nav-link active">Inventory</a>
+        <a href="/khata" class="nav-link">Udhaar Khata</a>
+      </nav>
+      <div class="status-badge" id="statusBadge">
+        <span class="status-dot"></span>
+        <span class="status-label">Ready</span>
+      </div>
+      <button class="lock-button" id="lockCounter" type="button">Lock Counter</button>
     </div>
   </header>
 
@@ -197,93 +201,44 @@
       <div class="user-audio-wrap" id="userAudioWrap" style="display: none;"></div>
     </section>
 
-    <!-- ─── VIEW TAB NAV ──────────────────────── -->
-    <nav class="view-tabs" role="tablist" aria-label="Dashboard views">
-      <button class="view-tab view-tab--active" id="tab-inventory" role="tab"
-              aria-selected="true" aria-controls="view-inventory">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true"
-             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
-        </svg>
-        Inventory &amp; Profit
-      </button>
-      <button class="view-tab" id="tab-khata" role="tab"
-              aria-selected="false" aria-controls="view-khata">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true"
-             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
-          <path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
-        </svg>
-        Udhaar Khata &amp; Customers
-        <span class="view-tab-badge" id="khataBadge" hidden>0</span>
-      </button>
-    </nav>
+    <!-- ─── DATA SECTION ───────────────────────── -->
+    <div class="data-row">
 
-    <!-- ─── VIEW: INVENTORY & PROFIT ──────────── -->
-    <section id="view-inventory" role="tabpanel" aria-labelledby="tab-inventory">
-      <div class="data-row">
-
-        <!-- Inventory Table Card -->
-        <section class="card table-card">
-          <div class="card-header">
-            <h2 class="card-title">Inventory</h2>
-            <span class="card-hint" id="lastUpdated">Loading…</span>
-          </div>
-          <div class="table-wrap">
-            <table class="inv-table" id="invTable">
-              <thead>
-                <tr>
-                  <th>Item</th>
-                  <th>Stock Qty</th>
-                  <th>Price (₹)</th>
-                  <th>Units Sold</th>
-                </tr>
-              </thead>
-              <tbody id="invBody">
-                <tr><td colspan="4" class="table-loading">Loading inventory…</td></tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
-
-        <!-- Profit Chart Card -->
-        <section class="card chart-card">
-          <div class="card-header">
-            <h2 class="card-title">Item-wise Profit</h2>
-            <span class="card-hint">price × units sold</span>
-          </div>
-          <div class="chart-wrap">
-            <canvas id="profitChart"></canvas>
-          </div>
-        </section>
-
-      </div><!-- /data-row -->
-    </section><!-- /view-inventory -->
-
-    <!-- ─── VIEW: UDHAAR KHATA & ACTIVITY ─────── -->
-    <section id="view-khata" hidden role="tabpanel" aria-labelledby="tab-khata">
-
-      <section class="card">
+      <!-- Inventory Table Card -->
+      <section class="card table-card">
         <div class="card-header">
-          <h2 class="card-title">Voice Udhaar Khata</h2>
-          <input class="ledger-search" type="search" id="customerSearch"
-                 aria-label="Search customers by name, last four digits, or notes"
-                 placeholder="Search customers or notes">
+          <h2 class="card-title">Inventory</h2>
+          <span class="card-hint" id="lastUpdated">Loading…</span>
         </div>
         <div class="table-wrap">
-          <table class="inv-table khata-table">
-            <thead><tr><th>Customer (Name - Last 4)</th><th>Pending Balance (₹)</th><th>Last Updated</th><th>Reminder</th></tr></thead>
-            <tbody id="khataBody"><tr><td colspan="4" class="table-loading">Loading ledger…</td></tr></tbody>
+          <table class="inv-table" id="invTable">
+            <thead>
+              <tr>
+                <th>Item</th>
+                <th>Stock Qty</th>
+                <th>Price (₹)</th>
+                <th>Units Sold</th>
+              </tr>
+            </thead>
+            <tbody id="invBody">
+              <tr><td colspan="4" class="table-loading">Loading inventory…</td></tr>
+            </tbody>
           </table>
         </div>
       </section>
 
-      <section class="card">
-        <div class="card-header"><h2 class="card-title">Live Voice Activity Log</h2></div>
-        <ol class="activity-log" id="activityLog"><li>Loading activity…</li></ol>
+      <!-- Profit Chart Card -->
+      <section class="card chart-card">
+        <div class="card-header">
+          <h2 class="card-title">Item-wise Profit</h2>
+          <span class="card-hint">price × units sold</span>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="profitChart"></canvas>
+        </div>
       </section>
 
-    </section><!-- /view-khata -->
+    </div><!-- /data-row -->
 
   </main>
 
@@ -306,6 +261,6 @@
       btn.querySelector('.eye-closed').style.display = isPassword ? '' : 'none';
     });
   </script>
-  <script src="./app.js?v=4"></script>
+  <script src="./app.js?v=5"></script>
 </body>
 </html>

@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VoxMetrics – Voice Udhaar Khata</title>
+  <link rel="stylesheet" href="./style.css?v=6" />
+</head>
+<body>
+
+  <!-- ═══════════════════════════════════════════
+       TOP BAR
+  ═══════════════════════════════════════════ -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <div class="logo-mark">VM</div>
+      <div class="topbar-titles">
+        <span class="topbar-brand">VoxMetrics</span>
+        <span class="topbar-sub">Kirana Voice Assistant</span>
+      </div>
+    </div>
+    <div class="counter-controls" id="counterControls" hidden>
+      <nav class="topbar-nav" aria-label="Page navigation">
+        <a href="/" class="nav-link">Inventory</a>
+        <a href="/khata" class="nav-link active">Udhaar Khata</a>
+      </nav>
+      <div class="status-badge" id="statusBadge">
+        <span class="status-dot"></span>
+        <span class="status-label">Ready</span>
+      </div>
+      <button class="lock-button" id="lockCounter" type="button">Lock Counter</button>
+    </div>
+  </header>
+
+  <!-- ═══════════════════════════════════════════
+       MAIN LAYOUT: UDHAAR KHATA & ACTIVITY
+  ═══════════════════════════════════════════ -->
+  <main class="main-wrap" id="dashboard" hidden>
+
+    <!-- ─── VOICE CONTROL CARD ─────────────────── -->
+    <section class="card voice-card">
+      <div class="card-header">
+        <h2 class="card-title">Voice Khata Assistant</h2>
+        <span class="card-hint">Speak or type customer credit, payment, or balance queries</span>
+      </div>
+
+      <!-- Mic Button -->
+      <div class="mic-wrap">
+        <button class="mic-btn" id="micBtn" title="Tap to Speak" aria-label="Tap to Speak">
+          <svg class="mic-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <rect x="9" y="2" width="6" height="12" rx="3" fill="currentColor"/>
+            <path d="M5 10a7 7 0 0 0 14 0" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <line x1="12" y1="17" x2="12" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            <line x1="8" y1="21" x2="16" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <p class="mic-label" id="micLabel">Tap to Speak</p>
+        <div class="mic-vol-wrap" id="micVolWrap" aria-hidden="true">
+          <div class="mic-vol-fill" id="micVolFill"></div>
+        </div>
+      </div>
+
+      <!-- Text Input Row -->
+      <div class="text-row">
+        <input
+          type="text"
+          id="textInput"
+          class="text-input"
+          placeholder="Type a Khata command… e.g. Ramesh 4521 ke naam 350 udhaar likho"
+          autocomplete="off"
+        />
+        <button class="send-btn" id="sendBtn">Send</button>
+      </div>
+
+      <!-- Quick Demo Pills -->
+      <div class="pills-row">
+        <span class="pills-label">Try:</span>
+        <button class="pill" data-cmd="Ramesh 4521 ke naam 350 udhaar likho">Ramesh 4521 ke naam 350 udhaar likho</button>
+        <button class="pill" data-cmd="Rahul 7890 ki detail nikalo">Rahul 7890 ki detail nikalo</button>
+        <button class="pill" data-cmd="Suresh 1234 ka 200 jama karo">Suresh 1234 ka 200 jama karo</button>
+        <button class="pill" data-cmd="Khata me kitna baaki hai?">Khata me kitna baaki hai?</button>
+        <button class="pill pill--noise" data-cmd="asdfghj noise test">asdfghj noise test</button>
+      </div>
+    </section>
+
+    <!-- ─── LIVE RESPONSE BOX ──────────────────── -->
+    <section class="card response-card" id="responseCard">
+      <div class="card-header">
+        <h2 class="card-title">Live Response</h2>
+      </div>
+
+      <div class="response-body" id="responseBody">
+        <p class="response-placeholder">Response will appear here after you speak or type a command.</p>
+      </div>
+
+      <!-- User Recording Audio Player -->
+      <div class="user-audio-wrap" id="userAudioWrap" style="display: none;"></div>
+    </section>
+
+    <!-- ─── UDHAAR KHATA TABLE ─────────────────── -->
+    <section class="card">
+      <div class="card-header">
+        <h2 class="card-title">Voice Udhaar Khata</h2>
+        <input class="ledger-search" type="search" id="customerSearch" aria-label="Search customers by name, last four digits, or notes" placeholder="Search customers or notes">
+      </div>
+      <div class="table-wrap">
+        <table class="inv-table khata-table">
+          <thead><tr><th>Customer (Name - Last 4)</th><th>Pending Balance (₹)</th><th>Last Updated</th><th>Reminder</th></tr></thead>
+          <tbody id="khataBody"><tr><td colspan="4" class="table-loading">Loading ledger…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ─── ACTIVITY LOG ───────────────────────── -->
+    <section class="card">
+      <div class="card-header"><h2 class="card-title">Live Voice Activity Log</h2></div>
+      <ol class="activity-log" id="activityLog"><li>Loading activity…</li></ol>
+    </section>
+
+  </main>
+
+  <footer class="footer">
+    <span>VoxMetrics &copy; 2026 &mdash; Multilingual Voice Copilot for Kirana Stores</span>
+  </footer>
+
+  <script src="./app.js?v=5"></script>
+</body>
+</html>

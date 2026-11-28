@@ -15,9 +15,12 @@ const tokenKey = "voxmetrics.session";
 const sessionToken = localStorage.getItem(tokenKey);
 
 function lockCounter(revoke = true) {
-  document.getElementById("dashboard").hidden = true;
-  document.getElementById("counterControls").hidden = true;
-  document.getElementById("authGate").hidden = false;
+  const dash = document.getElementById("dashboard");
+  if (dash) dash.hidden = true;
+  const ctrls = document.getElementById("counterControls");
+  if (ctrls) ctrls.hidden = true;
+  const gate = document.getElementById("authGate");
+  if (gate) gate.hidden = false;
   if (currentAudio) currentAudio.pause();
   document.getElementById("userAudioPlayer")?.pause();
   micStream?.getTracks().forEach(track => track.stop());
@@ -26,7 +29,7 @@ function lockCounter(revoke = true) {
     fetch("/api/auth/logout", {method: "POST", headers: {Authorization: "Bearer " + sessionToken},
                               keepalive: true}).catch(() => {});
   }
-  location.reload();
+  window.location.href = "/";
 }
 
 async function shopFetch(path, options = {}) {
@@ -79,7 +82,8 @@ async function fetchInventory() {
       throw new Error("Dashboard request failed");
     }
     applyDashboard(data);
-    document.querySelector(".topbar-sub").textContent = data.shop_name;
+    const sub = document.querySelector(".topbar-sub");
+    if (sub) sub.textContent = data.shop_name;
     return true;
   } catch {
     renderKhata([], "Could not load the ledger. Refresh to retry.");
@@ -113,7 +117,8 @@ function formatLedgerTime(timestamp) {
 }
 
 function filterCustomers() {
-  const search = document.getElementById("customerSearch").value.trim().toLocaleLowerCase();
+  const searchInput = document.getElementById("customerSearch");
+  const search = searchInput ? searchInput.value.trim().toLocaleLowerCase() : "";
   const rows = ledgerAccounts.filter(row =>
     [row.customer_name, row.last4_digits, row.notes].some(value => String(value || "").toLocaleLowerCase().includes(search)));
   renderKhata(rows, search ? "No matching customers." : "No customer accounts yet.");
@@ -122,6 +127,7 @@ function filterCustomers() {
 
 function renderKhata(accounts, emptyMessage = "No customer accounts yet.") {
   const body = document.getElementById("khataBody");
+  if (!body) return;
   body.replaceChildren();
   if (!accounts.length) {
     const cell = body.insertRow().insertCell();
@@ -162,6 +168,7 @@ function renderKhata(accounts, emptyMessage = "No customer accounts yet.") {
 
 function renderActivity(logs, emptyMessage = "Transactions will appear here.") {
   const feed = document.getElementById("activityLog");
+  if (!feed) return;
   feed.replaceChildren();
   if (!logs.length) {
     const empty = document.createElement("li");
@@ -248,6 +255,7 @@ async function sendAudioBlob(blob) {
 /** Render inventory table rows */
 function renderTable(data) {
   const tbody = document.getElementById("invBody");
+  if (!tbody) return;
   tbody.innerHTML = data.map(row => `
     <tr id="row-${escHtml(row.item).replace(/"/g, "&quot;")}">
       <td>${escHtml(capitalise(row.item))}</td>
@@ -263,11 +271,16 @@ function renderTable(data) {
 
 /** Render/update Chart.js bar chart */
 function renderChart(data, chartData) {
+  const canvas = document.getElementById("profitChart");
+  if (!canvas) return;
   const analytics = Array.isArray(chartData);
-  document.querySelector(".chart-card .card-title").textContent = analytics ? "Inventory Analytics" : "Item-wise Profit";
-  document.querySelector(".chart-card .card-hint").textContent = analytics ? "" : "price × units sold";
+  const titleEl = document.querySelector(".chart-card .card-title");
+  if (titleEl) titleEl.textContent = analytics ? "Inventory Analytics" : "Item-wise Profit";
+  const hintEl = document.querySelector(".chart-card .card-hint");
+  if (hintEl) hintEl.textContent = analytics ? "" : "price × units sold";
   if (typeof Chart === "undefined") {
-    document.getElementById("chartLibrary").onload = () => renderChart(data, chartData);
+    const lib = document.getElementById("chartLibrary");
+    if (lib) lib.onload = () => renderChart(data, chartData);
     return;
   }
 
@@ -276,7 +289,7 @@ function renderChart(data, chartData) {
   const series = analytics ? "Value" : "Profit (₹)";
   const format = v => (analytics ? "" : "₹") + v.toLocaleString("en-IN");
 
-  const ctx = document.getElementById("profitChart").getContext("2d");
+  const ctx = canvas.getContext("2d");
 
   if (profitChart) {
     profitChart.data.labels             = labels;
@@ -369,6 +382,7 @@ function playAudioBase64(b64) {
  */
 function showResponse(res) {
   const body = document.getElementById("responseBody");
+  if (!body) return;
   const hasAudio = !!(res.audioBase64);
 
   // Store for replay
@@ -759,18 +773,20 @@ function encodeWav(samples, sampleRate = 44100) {
 
 function wireEvents() {
   // Mic toggle
-  document.getElementById("micBtn").addEventListener("click", () => {
-    const micBtn = document.getElementById("micBtn");
-    if (micBtn.disabled) return;
-    isRecording ? stopRecording() : startRecording();
-  });
+  const micBtn = document.getElementById("micBtn");
+  if (micBtn) {
+    micBtn.addEventListener("click", () => {
+      if (micBtn.disabled) return;
+      isRecording ? stopRecording() : startRecording();
+    });
+  }
 
   // Send button & Enter key
   const input   = document.getElementById("textInput");
   const sendBtn = document.getElementById("sendBtn");
 
   async function handleSend() {
-    if (sendBtn.disabled) return;
+    if (!sendBtn || sendBtn.disabled || !input) return;
     const text = input.value.trim();
     if (!text) return;
     input.value = "";
@@ -790,15 +806,18 @@ function wireEvents() {
     }
   }
 
-  sendBtn.addEventListener("click", handleSend);
-  input.addEventListener("keydown", e => { if (e.key === "Enter") handleSend(); });
+  if (sendBtn && input) {
+    sendBtn.addEventListener("click", handleSend);
+    input.addEventListener("keydown", e => { if (e.key === "Enter") handleSend(); });
+  }
 
   // Demo pills
   document.querySelectorAll(".pill").forEach(pill => {
     pill.addEventListener("click", async () => {
       if (pill.disabled) return;
       const cmd = pill.dataset.cmd;
-      document.getElementById("textInput").value = cmd;
+      const textInput = document.getElementById("textInput");
+      if (textInput) textInput.value = cmd;
       setStatus("Thinking…", "ready");
       setControlsDisabled(true);
 
@@ -810,7 +829,7 @@ function wireEvents() {
         renderChart(inventory, res.chartData);
         autoSwitchView(res.intent);
 
-        document.getElementById("textInput").value = "";
+        if (textInput) textInput.value = "";
       } finally {
         setControlsDisabled(false);
         setStatus("Ready", "ready");
@@ -836,11 +855,13 @@ function switchView(viewId) {
   views.forEach(id => {
     const panel = document.getElementById(id);
     const tab   = document.getElementById(tabs[id]);
-    if (!panel || !tab) return;
+    if (!panel) return;
     const active = id === viewId;
     panel.hidden = !active;
-    tab.setAttribute("aria-selected", String(active));
-    tab.classList.toggle("view-tab--active", active);
+    if (tab) {
+      tab.setAttribute("aria-selected", String(active));
+      tab.classList.toggle("view-tab--active", active);
+    }
   });
 
   try { sessionStorage.setItem(VIEW_TAB_KEY, viewId); } catch {}
@@ -871,7 +892,10 @@ function intentToView(intent) {
 function autoSwitchView(intent) {
   if (!intent) return;
   const target = intentToView(intent);
-  if (target) switchView(target);
+  if (target) {
+    const el = document.getElementById(target);
+    if (el) switchView(target);
+  }
 }
 
 /**
@@ -900,6 +924,7 @@ const escHtml = s => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"
 function wireAuth() {
   const owner = document.getElementById("ownerForm");
   const signup = document.getElementById("signupForm");
+  if (!owner || !signup) return;
   const feedback = document.getElementById("authFeedback");
   const toast = document.getElementById("smsToast");
   const next = document.getElementById("signupNext");
@@ -911,22 +936,31 @@ function wireAuth() {
     signup.reset();
     expectedOtp = "";
     signup.phone.readOnly = false;
-    document.getElementById("otpStep").hidden = true;
-    document.getElementById("passwordStep").hidden = true;
+    const otpStep = document.getElementById("otpStep");
+    if (otpStep) otpStep.hidden = true;
+    const pwdStep = document.getElementById("passwordStep");
+    if (pwdStep) pwdStep.hidden = true;
     signup.otp.required = signup.shop_name.required = signup.password.required = false;
-    toast.hidden = true;
-    next.textContent = "Send OTP";
-    feedback.textContent = "";
-    document.getElementById("ownerTab").setAttribute("aria-pressed", String(!register));
-    document.getElementById("signupTab").setAttribute("aria-pressed", String(register));
+    if (toast) toast.hidden = true;
+    if (next) next.textContent = "Send OTP";
+    if (feedback) feedback.textContent = "";
+    const oTab = document.getElementById("ownerTab");
+    if (oTab) oTab.setAttribute("aria-pressed", String(!register));
+    const sTab = document.getElementById("signupTab");
+    if (sTab) sTab.setAttribute("aria-pressed", String(register));
   }
-  document.getElementById("ownerTab").onclick = () => selectTab(false);
-  document.getElementById("signupTab").onclick = () => selectTab(true);
-  document.getElementById("fillDemo").onclick = () => {
-    owner.phone.value = "9876543210";
-    owner.password.value = "1234";
-    owner.querySelector("[type=submit]").focus();
-  };
+  const ownerTab = document.getElementById("ownerTab");
+  if (ownerTab) ownerTab.onclick = () => selectTab(false);
+  const signupTab = document.getElementById("signupTab");
+  if (signupTab) signupTab.onclick = () => selectTab(true);
+  const fillDemo = document.getElementById("fillDemo");
+  if (fillDemo) {
+    fillDemo.onclick = () => {
+      owner.phone.value = "9876543210";
+      owner.password.value = "1234";
+      owner.querySelector("[type=submit]")?.focus();
+    };
+  }
   async function auth(path, payload) {
     const response = await fetch("/api/auth/" + path, {method: "POST",
       headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload)});
@@ -938,26 +972,30 @@ function wireAuth() {
     event.preventDefault();
     const form = event.currentTarget;
     const button = form.querySelector("[type=submit]");
-    button.disabled = true;
-    feedback.textContent = "";
+    if (button) button.disabled = true;
+    if (feedback) feedback.textContent = "";
     try {
       if (form === signup && !expectedOtp) {
         const data = await auth("send-otp", {phone: signup.phone.value});
         if (data.is_registered) throw new Error("This number already has a store. Use Owner Login.");
         expectedOtp = data.otp_demo;
-        toast.textContent = "Demo SMS · Your OTP is " + expectedOtp;
-        toast.hidden = false;
+        if (toast) {
+          toast.textContent = "Demo SMS · Your OTP is " + expectedOtp;
+          toast.hidden = false;
+        }
         signup.phone.readOnly = signup.otp.required = true;
-        document.getElementById("otpStep").hidden = false;
-        next.textContent = "Continue";
+        const otpStep = document.getElementById("otpStep");
+        if (otpStep) otpStep.hidden = false;
+        if (next) next.textContent = "Continue";
         signup.otp.focus();
         return;
       }
-      if (form === signup && document.getElementById("passwordStep").hidden) {
+      const pwdStep = document.getElementById("passwordStep");
+      if (form === signup && pwdStep && pwdStep.hidden) {
         if (signup.otp.value !== expectedOtp) throw new Error("Check the four digits in the demo SMS.");
-        document.getElementById("passwordStep").hidden = false;
+        pwdStep.hidden = false;
         signup.shop_name.required = signup.password.required = true;
-        next.textContent = "Create store";
+        if (next) next.textContent = "Create store";
         signup.shop_name.focus();
         return;
       }
@@ -965,9 +1003,9 @@ function wireAuth() {
       localStorage.setItem(tokenKey, data.token);
       location.reload();
     } catch (error) {
-      feedback.textContent = error.message;
+      if (feedback) feedback.textContent = error.message;
     } finally {
-      button.disabled = false;
+      if (button) button.disabled = false;
     }
   }
   owner.onsubmit = signup.onsubmit = submit;
@@ -975,37 +1013,65 @@ function wireAuth() {
 
 async function init() {
   wireAuth();
+  const isKhataPage = window.location.pathname.startsWith("/khata");
   window.addEventListener("storage", event => {
-    if (event.key === tokenKey || event.key === null) location.reload();
+    if (event.key === tokenKey || event.key === null) {
+      if (!localStorage.getItem(tokenKey) && isKhataPage) {
+        window.location.href = "/";
+      } else {
+        location.reload();
+      }
+    }
   });
   window.addEventListener("pageshow", event => {
-    if (event.persisted && localStorage.getItem(tokenKey) !== sessionToken) location.reload();
+    if (event.persisted && localStorage.getItem(tokenKey) !== sessionToken) {
+      if (isKhataPage) window.location.href = "/";
+      else location.reload();
+    }
   });
-  if (!sessionToken) return;
-  if (!await fetchInventory()) {
-    document.getElementById("authFeedback").textContent = "Could not open your store. Sign in again or refresh to retry.";
+  if (!sessionToken) {
+    if (isKhataPage) {
+      window.location.href = "/";
+      return;
+    }
     return;
   }
-  document.getElementById("authGate").hidden = true;
-  document.getElementById("counterControls").hidden = false;
-  document.getElementById("dashboard").hidden = false;
-  document.getElementById("lockCounter").onclick = () => lockCounter();
-  document.getElementById("customerSearch").oninput = filterCustomers;
+  if (!await fetchInventory()) {
+    const feedback = document.getElementById("authFeedback");
+    if (feedback) feedback.textContent = "Could not open your store. Sign in again or refresh to retry.";
+    if (isKhataPage) {
+      window.location.href = "/";
+      return;
+    }
+    return;
+  }
+  const authGate = document.getElementById("authGate");
+  if (authGate) authGate.hidden = true;
+  const counterControls = document.getElementById("counterControls");
+  if (counterControls) counterControls.hidden = false;
+  const dashboard = document.getElementById("dashboard");
+  if (dashboard) dashboard.hidden = false;
+  const lockBtn = document.getElementById("lockCounter");
+  if (lockBtn) lockBtn.onclick = () => lockCounter();
+  const custSearch = document.getElementById("customerSearch");
+  if (custSearch) custSearch.oninput = filterCustomers;
   renderTable(inventory);
   renderChart(inventory);
   wireEvents();
 
-  // ── Wire view tab buttons ──────────────────────────────
-  document.getElementById("tab-inventory").addEventListener("click", () => switchView("view-inventory"));
-  document.getElementById("tab-khata").addEventListener("click",    () => switchView("view-khata"));
-
-  // Restore last active view from sessionStorage (survives F5 but clears on login/logout)
-  try {
-    const saved = sessionStorage.getItem(VIEW_TAB_KEY);
-    if (saved === "view-inventory" || saved === "view-khata") switchView(saved);
-    else switchView("view-inventory");
-  } catch {
-    switchView("view-inventory");
+  // Tab switching if tabs are present on the page
+  const tabInv = document.getElementById("tab-inventory");
+  const tabKhata = document.getElementById("tab-khata");
+  if (tabInv && tabKhata) {
+    tabInv.addEventListener("click", () => switchView("view-inventory"));
+    tabKhata.addEventListener("click", () => switchView("view-khata"));
+    try {
+      const saved = sessionStorage.getItem(VIEW_TAB_KEY);
+      if (saved === "view-inventory" || saved === "view-khata") switchView(saved);
+      else switchView("view-inventory");
+    } catch {
+      switchView("view-inventory");
+    }
   }
 }
 

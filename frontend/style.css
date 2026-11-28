@@ -421,6 +421,33 @@ body {
 .activity-log time { color: #475569; font-variant-numeric: tabular-nums; }
 [hidden] { display: none !important; }
 .counter-controls { display: flex; align-items: center; gap: .75rem; }
+.topbar-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: #f1f5f9;
+  padding: 3px;
+  border-radius: 9px;
+  margin-right: 4px;
+}
+.nav-link {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 13px;
+  border-radius: 7px;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  color: #64748b;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+.nav-link:hover { color: #0f172a; }
+.nav-link.active {
+  background: #ffffff;
+  color: #16a34a;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+}
 .lock-button { font: inherit; cursor: pointer; border: 1px solid #cbd5e1; border-radius: .5rem; background: white; padding: .5rem .7rem; color: #334155; }
 
 /* ══════════════════════════════════════════════════════════

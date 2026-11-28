@@ -10,7 +10,7 @@ from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from groq import GroqError
 from pydantic import BaseModel, Field, ValidationError
@@ -210,4 +210,15 @@ async def voice_command(request: Request, audio: UploadFile = File(...)):
         ))
 
 
+@app.get("/")
+def serve_index():
+    return FileResponse(FRONTEND_DIR / "index.html")
+
+
+@app.get("/khata")
+def serve_khata():
+    return FileResponse(FRONTEND_DIR / "khata.html")
+
+
+app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
