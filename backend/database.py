@@ -69,6 +69,23 @@ class UnknownInventoryItem(ValueError):
     pass
 
 
+class IncompleteNewItem(ValueError):
+    pass
+
+
+def get_existing_items() -> list[str]:
+    with closing(sqlite3.connect(DB_PATH)) as db:
+        return [name for (name,) in db.execute("SELECT DISTINCT item_name FROM inventory ORDER BY item_name")]
+
+
+class InventoryWrite(NamedTuple):
+    name: str
+    value: float
+    action: str
+    unit: str | None = None
+    price: float | None = None
+
+
 class StockChange(NamedTuple):
     item_name: str
     before: float
@@ -76,33 +93,64 @@ class StockChange(NamedTuple):
     unit: str
 
 
-def update_inventory_batch(items: list[tuple[str, float, str]]) -> list[StockChange]:
+class ProductChange(NamedTuple):
+    item_name: str
+    before: float
+    after: float
+    unit: str
+    price: float
+    created: bool
+
+
+def update_inventory_batch(items: list[InventoryWrite | tuple[str, float, str]]) -> list[StockChange | ProductChange]:
     """Validate a command and record each stock or selling-price change under one write lock."""
-    if not items or any(not math.isfinite(value) or value <= 0 for _, value, _ in items):
+    writes = [InventoryWrite(*item) for item in items]
+    if not writes or any(not math.isfinite(w.value) or w.value <= 0 for w in writes):
         raise ValueError("Expected a positive finite amount for every item")
-    if any(action not in {"ADD", "SELL", "UPDATE_PRICE"} for _, _, action in items):
+    if any(w.action not in {"ADD", "SELL", "UPDATE_PRICE", "CREATE_ITEM"} for w in writes):
         raise ValueError("Unknown inventory action")
 
     with closing(sqlite3.connect(DB_PATH)) as db, db:
         db.execute("BEGIN IMMEDIATE")
-        stock = {name for (name,) in db.execute("SELECT item_name FROM inventory")}
-        for name, _, _ in items:
-            if name not in stock:
-                raise UnknownInventoryItem(name)
+        stock = dict(db.execute("SELECT item_name, unit FROM inventory"))
+        for w in writes:
+            if w.action == "CREATE_ITEM":
+                if w.price is not None and (not math.isfinite(w.price) or w.price <= 0):
+                    raise IncompleteNewItem(w.name)
+                if w.name not in stock and (w.price is None or w.unit not in {"kg", "L", "packets", "pieces"}):
+                    raise IncompleteNewItem(w.name)
+                if w.name in stock and w.unit is not None and w.unit != stock[w.name]:
+                    raise IncompleteNewItem(w.name)
+                stock.setdefault(w.name, w.unit)
+            elif w.name not in stock and w.action == "ADD":
+                raise IncompleteNewItem(w.name)
+            elif w.name not in stock:
+                raise UnknownInventoryItem(w.name)
 
         changes = []
-        for name, value, action in items:
-            before_qty, before_price, unit = db.execute(
+        for name, value, action, requested_unit, price in writes:
+            row = db.execute(
                 "SELECT quantity, price_per_unit, unit FROM inventory WHERE item_name = ?", (name,)
             ).fetchone()
+            created = row is None
+            if created:
+                if action != "CREATE_ITEM":
+                    raise UnknownInventoryItem(name)
+                before_qty, before_price, unit = 0, None, requested_unit
+                db.execute("""
+                    INSERT INTO inventory (item_name, quantity, unit, price_per_unit, cost_price, units_sold)
+                    VALUES (?, ?, ?, ?, ?, 0)
+                """, (name, value, unit, price, round(price * 0.85, 2)))
+            else:
+                before_qty, before_price, unit = row
             if action == "SELL":
                 db.execute(
                     "UPDATE inventory SET quantity = MAX(0, quantity - ?), units_sold = units_sold + ? WHERE item_name = ?",
                     (value, value, name),
                 )
-            elif action == "ADD":
+            elif action == "ADD" or (action == "CREATE_ITEM" and not created):
                 db.execute("UPDATE inventory SET quantity = quantity + ? WHERE item_name = ?", (value, name))
-            else:
+            if action == "UPDATE_PRICE" or (action == "CREATE_ITEM" and not created and price is not None):
                 db.execute("""
                     UPDATE inventory
                     SET price_per_unit = :price,
@@ -111,14 +159,17 @@ def update_inventory_batch(items: list[tuple[str, float, str]]) -> list[StockCha
                                  ELSE :price END
                             ELSE cost_price END
                     WHERE item_name = :name
-                """, {"price": value, "name": name})
+                """, {"price": value if action == "UPDATE_PRICE" else price, "name": name})
             after_qty, after_price, sold = db.execute(
                 "SELECT quantity, price_per_unit, units_sold FROM inventory WHERE item_name = ?", (name,)
             ).fetchone()
             before, after = (before_price, after_price) if action == "UPDATE_PRICE" else (before_qty, after_qty)
             if not math.isfinite(after) or not math.isfinite(sold):
                 raise ValueError("Inventory total exceeds the supported range")
-            changes.append(StockChange(name, before, after, unit))
+            if action == "CREATE_ITEM":
+                changes.append(ProductChange(name, before, after, unit, after_price, created))
+            else:
+                changes.append(StockChange(name, before, after, unit))
         return changes
 
 
@@ -126,7 +177,7 @@ def update_inventory_stock(item_name: str, qty: float, is_sale: bool):
     """Apply one stock update and return (before, after, unit)."""
     try:
         change, = update_inventory_batch([(item_name, qty, "SELL" if is_sale else "ADD")])
-    except UnknownInventoryItem:
+    except (UnknownInventoryItem, IncompleteNewItem):
         return None, None, None
     return change.before, change.after, change.unit
 

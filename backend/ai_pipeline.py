@@ -13,7 +13,10 @@ from dotenv import load_dotenv
 from groq import Groq, GroqError
 from pydantic import BaseModel, Field, field_validator
 
-from .database import UnknownInventoryItem, execute_analytics_query, read_inventory, update_inventory_batch
+from .database import (
+    IncompleteNewItem, InventoryWrite, ProductChange, UnknownInventoryItem,
+    execute_analytics_query, get_existing_items, read_inventory, update_inventory_batch,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -23,34 +26,73 @@ client = Groq(api_key=api_key, timeout=30, max_retries=1) if api_key else None
 logger = logging.getLogger("voxmetrics")
 
 
+# Public replies use two-letter routing codes. A dialect without its own
+# ISO 639-1 code keeps its wording/script independently of its voice route.
+GTTS_LANG_MAP = {
+    **{code: code for code in "hi en ta te kn ml mr gu bn pa ur ne".split()},
+    "or": "bn", "as": "bn", "bh": "hi", "bgc": "hi", "raj": "hi",
+    "mai": "hi", "kok": "mr", "sd": "ur", "ks": "ur", "sa": "hi",
+}
+
+LANGUAGE_ROUTES = {
+    "bho": "hi", "bgc": "hi", "raj": "hi", "mai": "hi", "kok": "mr",
+    "doi": "hi", "brx": "hi", "mni": "hi", "sat": "hi",
+    "hinglish": "hi", "tanglish": "ta", "kanglish": "kn",
+}
+
+
 class Command(BaseModel):
     transcript: str = Field(max_length=4000)
 
 
 class CommandItem(BaseModel):
-    action: Optional[Literal["ADD", "SELL", "UPDATE_PRICE"]] = None
+    action: Optional[Literal["ADD", "SELL", "UPDATE_PRICE", "CREATE_ITEM"]] = None
     item_name: Optional[str] = None
     quantity: Optional[float] = Field(default=None, strict=True)
     new_price: Optional[float] = Field(default=None, strict=True)
     price_words: Optional[str] = None
+    unit: Optional[str] = None
+    price_per_unit: Optional[float] = Field(default=None, strict=True)
+    quantity_words: Optional[str] = None
+    source_clause: Optional[str] = None
+    source_name: Optional[str] = None
+    action_words: Optional[str] = None
 
-    @field_validator("quantity", "new_price", mode="before")
+    @field_validator("quantity", "new_price", "price_per_unit", mode="before")
     @classmethod
     def numeric_value(cls, value):
         return value if type(value) in (int, float) else None
 
 
 class Decision(BaseModel):
-    detected_lang: Literal["hi", "ta", "mr", "bn", "te", "en"] = "hi"
+    detected_lang: str = "hi"
     intent: Literal["INVENTORY_UPDATE", "ADD_INVENTORY", "SELL_ITEM", "ANALYTICS_QUERY", "INCOMPLETE_INPUT", "NOISE_ERROR"]
     items: list[CommandItem] = Field(default_factory=list)
     metric: Optional[str] = None
     sql_query: str = ""
     reply_local: str = ""
 
+    @field_validator("detected_lang", mode="before")
+    @classmethod
+    def normalize_language(cls, value):
+        code = value.strip().lower() if isinstance(value, str) else ""
+        if code in GTTS_LANG_MAP and len(code) == 2:
+            return code
+        return LANGUAGE_ROUTES.get(code, "hi")
 
-ALLOWED_ITEMS = {"curd", "sugar", "milk", "rice", "tea", "lentils", "oil", "salt"}
+
 ITEM_ALIASES = {
+    "ಸಕ್ಕರೆ": "sugar", "sakkare": "sugar", "ಮೊಸರು": "curd", "mosaru": "curd",
+    "ಹಾಲು": "milk", "haalu": "milk", "ಅಕ್ಕಿ": "rice", "akki": "rice",
+    "ಎಣ್ಣೆ": "oil", "enne": "oil", "ಉಪ್ಪು": "salt", "ಬೇಳೆ": "lentils",
+    "bele": "lentils", "ಚಹಾ": "tea", "chaha": "tea",
+    "mirch": "chilli", "lal mirch": "chilli", "haldi": "turmeric", "atta": "flour",
+    "besan": "gram_flour", "sabun": "soap",
+    "मिर्च": "chilli", "लाल मिर्च": "chilli", "हल्दी": "turmeric", "आटा": "flour",
+    "बेसन": "gram_flour", "साबुन": "soap",
+    "khand": "sugar", "panchasara": "sugar", "chini": "sugar", "perugu": "curd",
+    "paalu": "milk", "biyyam": "rice", "bhat": "rice", "ennai": "oil",
+    "meeth": "salt", "noon": "salt", "paruppu": "lentils", "theneer": "tea", "chaya": "tea",
     "curd": "curd", "mattha": "curd", "dahi": "curd", "thayir": "curd", "doi": "curd",
     "sugar": "sugar", "cheeni": "sugar", "sakkar": "sugar", "sakkarai": "sugar",
     "milk": "milk", "doodh": "milk", "dudh": "milk", "paal": "milk",
@@ -60,6 +102,144 @@ ITEM_ALIASES = {
     "oil": "oil", "tel": "oil", "nune": "oil",
     "salt": "salt", "namak": "salt", "uppu": "salt",
 }
+
+ACTION_VERBS = {
+    "hi": {
+        "ADD": "add karo|daal do|badha do|aaya hai|stock mein jodo|jama karo|जोड़ो|जोड़ें|डाल दो|बढ़ा दो|आया है",
+        "SELL": "bik gaya|bik gayi|bik gaye|becha|kam karo|nikal gaya|grahak ko diya|बिक गया|बिक गई|बेचा|कम करो|ग्राहक को दिया",
+    },
+    "kn": {
+        "ADD": "ಸೇರಿಸಿ|serisi|ಹಾಕಿ|haaki|ಸೇರಿಸು|serisu|ಬಂದಿದೆ|bandide",
+        "SELL": "ಮಾರಾಟವಾಯಿತು|maratavayitu|ಮಾರಿದೆ|maride|ಕಡಿಮೆ ಮಾಡಿ|kadime madi|ಹೋಯಿತು|hoyitu",
+    },
+    "ta": {
+        "ADD": "சேர்க்கவும்|serkkavum|சேர்த்துக்கொள்ளுங்கள்|serthukkonga|போடு|podu",
+        "SELL": "விற்றுவிட்டது|vitruvittathu|குறைக்கவும்|kuraikkavum",
+    },
+    "te": {
+        "ADD": "కలపండి|kalapandi|వేయండి|veyandi|యాడ్ చేయండి",
+        "SELL": "అమ్ముడైంది|ammudaindi|తగ్గించండి|tagginchandi",
+    },
+    "mr": {
+        "ADD": "टाका|taka|वाढवा|vadhva|ऍड करा",
+        "SELL": "विकले|vikle|कमी करा|kami kara",
+    },
+    "bn": {
+        "ADD": "যোগ করুন|jog korun|দিন|din|অ্যাড করুন",
+        "SELL": "বিক্রি হয়েছে|bikri hoyeche|কমান|koman",
+    },
+    "en": {
+        "ADD": "add|restock|received",
+        "SELL": "sell|sold|deduct|subtract|remove|reduce|customer bought|customer purchased|customer took|to a customer|to the customer",
+    },
+}
+
+
+def _verb_pattern(action: str) -> re.Pattern:
+    phrases = [phrase for verbs in ACTION_VERBS.values() for phrase in verbs[action].split("|")]
+    return re.compile(r"(?<!\w)(?:" + "|".join(map(re.escape, phrases)) + r")(?!\w)", re.I)
+
+
+ADD_VERB = _verb_pattern("ADD")
+SELL_VERB = _verb_pattern("SELL")
+
+_COUNTS = {
+    "one": 1, "ek": 1, "एक": 1, "two": 2, "do": 2, "दो": 2,
+    "three": 3, "teen": 3, "तीन": 3, "four": 4, "char": 4, "चार": 4,
+    "five": 5, "paanch": 5, "पाँच": 5, "six": 6, "chhe": 6, "छह": 6,
+    "seven": 7, "saat": 7, "सात": 7, "eight": 8, "aath": 8, "आठ": 8,
+    "nine": 9, "nau": 9, "नौ": 9, "ten": 10, "das": 10, "दस": 10,
+}
+_FRACTIONS = {
+    "pao": .25, "pav": .25, "पाव": .25, "aadha": .5, "half": .5, "आधा": .5,
+    "sawa": 1.25, "सवा": 1.25, "dedh": 1.5, "डेढ़": 1.5, "dhai": 2.5, "ढाई": 2.5,
+}
+# Factor and applicable inventory unit. An empty unit means the item's base unit.
+_MEASURES = {
+    **dict.fromkeys("pipa pipas पीपा पीपे tin tins टिन dabba dabbas dabbe डब्बा डिब्बा".split(), (10, "L")),
+    **dict.fromkeys("katta kattas katte कट्टा कट्टे bori boris बोरी bora boras बोरा".split(), (50, "sack")),
+    **dict.fromkeys("darjan dozen dozens दर्जन".split(), (12, "count")),
+    **dict.fromkeys("g gm gram grams ग्राम".split(), (.001, "kg")),
+    **dict.fromkeys("ml milliliter milliliters millilitre millilitres मिलीलीटर".split(), (.001, "L")),
+    **dict.fromkeys("kg kilo kilos किलो".split(), (1, "kg")),
+    **dict.fromkeys("l liter liters litre litres लीटर".split(), (1, "L")),
+}
+_SACK_ITEMS = {"rice", "sugar", "lentils", "flour", "salt"}
+_MEASURE_PATTERN = "|".join(sorted(_MEASURES, key=len, reverse=True))
+_QUANTITY_PHRASE = re.compile(
+    r"(?<![\w.,+-])(?:(?P<count>[+-]?(?:\d+(?:,\d{2,3})*(?:\.\d+)?|\.\d+)|"
+    + "|".join(_COUNTS) + r")\s*)?(?:(?P<fraction>" + "|".join(_FRACTIONS)
+    + r")(?:\s+(?:a\s+)?(?P<fraction_unit>" + _MEASURE_PATTERN + r"))?|(?P<measure>"
+    + _MEASURE_PATTERN + r"))(?!\w)", re.I,
+)
+
+
+def normalize_kirana_quantity(raw_text, item_name, quantity, *, base_unit=None):
+    """Derive the amount from a single spoken measure, independent of model scaling."""
+    matches = [m for m in _QUANTITY_PHRASE.finditer(raw_text.casefold()) if m["count"] or m["fraction"]]
+    if not matches:
+        return quantity
+    if len(matches) != 1:
+        return None
+    match = matches[0]
+    count = match["count"]
+    fraction = match["fraction"]
+    number = _COUNTS.get(count, count) if count else 1
+    factor, unit = _MEASURES.get(match["measure"] or match["fraction_unit"], (1, base_unit))
+    canonical = ITEM_ALIASES.get(item_name, item_name)
+    if not base_unit:
+        if canonical in _SACK_ITEMS:
+            base_unit = "kg"
+        elif canonical in {"oil", "milk"}:
+            base_unit = "L"
+    if unit == "sack":
+        if canonical not in _SACK_ITEMS:
+            return None
+        unit = "kg"
+    elif unit == "count":
+        unit = base_unit if base_unit in {"pieces", "packets"} else "pieces"
+    elif factor == 10 and not base_unit and canonical not in {"oil", "milk"}:
+        return None
+    if unit and base_unit and unit != base_unit:
+        return None
+    return float(Decimal(str(number).replace(",", "")) * Decimal(str(_FRACTIONS.get(fraction, 1)))
+                 * Decimal(str(factor)))
+
+
+def _normalize_stock_item(item, transcript, single_item, inventory_units):
+    """Bind one measurement to this item and return the evidence for its confirmation."""
+    words = (item.quantity_words or "").strip().casefold()
+    clause = (item.source_clause or (transcript if single_item else words)).casefold()
+    if not clause or clause not in transcript.casefold():
+        return ""
+    matches = [m for m in _QUANTITY_PHRASE.finditer(clause) if m["count"] or m["fraction"]]
+    if words and words in clause and matches:
+        # Shared-verb clauses can contain another item's container alongside
+        # this item's ordinary quantity. Only use the cited measurement.
+        matches = [m for m in matches if words == m.group() or words in m.group().split()
+                   or m.group() in words]
+    if len(matches) > 1:
+        item.quantity = None
+        return ""
+    if not matches:
+        return ""
+    match = matches[0]
+    raw_name = (item.item_name or "").casefold()
+    name = ITEM_ALIASES.get(raw_name, raw_name.replace(" ", "_"))
+    factor, unit = _MEASURES.get(match["measure"] or match["fraction_unit"], (1, None))
+    base_unit = inventory_units.get(raw_name) or inventory_units.get(name) or item.unit
+    if not base_unit:
+        if name in _SACK_ITEMS:
+            base_unit = "kg"
+        elif name in {"milk", "oil"}:
+            base_unit = "L"
+        elif unit == "count":
+            base_unit = "pieces"
+        elif unit in {"kg", "L"} and factor != 10:
+            base_unit = unit
+    item.quantity = normalize_kirana_quantity(match.group(), name, item.quantity, base_unit=base_unit)
+    item.unit = base_unit
+    return match.group() if factor != 1 or match["fraction"] else ""
 
 METRIC_SQL_MAP = {
     "highest_price": "SELECT item_name AS label, price AS value FROM inventory ORDER BY value DESC LIMIT 3",
@@ -73,9 +253,9 @@ METRIC_SQL_MAP = {
 SYSTEM_PROMPT = """You are an AI assistant for an Indian Kirana grocery store inventory system.
 Analyze the user transcript and return ONLY a single JSON object with these exact keys:
 {
-  "detected_lang": "hi" | "ta" | "mr" | "bn" | "te" | "en",
+  "detected_lang": <two-letter language routing code>,
   "intent": "INVENTORY_UPDATE" | "ANALYTICS_QUERY" | "INCOMPLETE_INPUT" | "NOISE_ERROR",
-  "items": [{"action": "ADD" | "SELL" | "UPDATE_PRICE", "item_name": "curd" | "sugar" | "milk" | "rice" | "tea" | "lentils" | "oil" | "salt" | null, "quantity": <stock amount or null>, "new_price": <explicit new selling price or null>, "price_words": <verbatim number words if spoken as words, else null>}],
+  "items": [{"action": "ADD" | "SELL" | "UPDATE_PRICE" | "CREATE_ITEM", "item_name": <canonical product name or null>, "quantity": <stock amount or null>, "new_price": <explicit updated price or null>, "unit": "kg" | "L" | "packets" | "pieces" | null, "price_per_unit": <explicit selling price for creation or null>, "source_name": <verbatim product words>, "action_words": <verbatim affirmative action phrase or null>, "source_clause": <verbatim clause governing this item or null>, "quantity_words": <verbatim spoken quantity words or null>, "price_words": <verbatim spoken price words or null>}],
   "metric": "lowest_stock" | "highest_price" | "lowest_price" | "highest_profit" | "top_selling" | "all_inventory" | null,
   "sql_query": "<SQL string or empty>",
   "reply_local": "<conversational sentence in detected_lang>"
@@ -83,18 +263,31 @@ Analyze the user transcript and return ONLY a single JSON object with these exac
 
 Strict Rules:
 1. Canonical Item Names (map regional terms):
-   - mattha / dahi / thayir / doi -> curd (packets)
-   - cheeni / sakkarai / sakkar -> sugar (kg)
-   - doodh / paal -> milk (L)
-   - chawal / arisi -> rice (kg)
-   - chai / tea patti -> tea (packets)
-   - dal / lentils -> lentils (kg)
-   - tel / oil -> oil (L)
-   - namak / salt -> salt (kg)
-   For any other item, set item_name = null.
+   Resolve native scripts, romanizations, inflections and dialect synonyms by meaning.
+   Examples of canonical grocery names appear below. They are not exhaustive.
+   Match existing_items first. For other new products use the English singular in lowercase,
+   separating words with underscores. Never substitute a similar-sounding existing product.
+   Only CREATE_ITEM can introduce a product. Use it for an affirmative request to stock
+   a new product with its explicit quantity, unit and selling price per unit. For example,
+   "5 kilo haldi 80 rupaye mein add karo" creates turmeric, 5 kg at 80 per kg.
+   Never infer a unit price from total spend. Copy the creation clause into source_clause.
+   Include source_name with the exact product words from the transcript when translating
+   a regional product name or converting its plural form to singular.
+   Never create from a sale, price change, query, negation or hypothetical.
+   For an existing product use ADD for ordinary restocking; if an explicit add also
+   specifies its selling price, use CREATE_ITEM to restock and apply that price.
+   If a new product lacks quantity or selling price, return INCOMPLETE_INPUT and request both.
 
 2. Unit Conversions:
-   Convert grams to kg (500 gram = 0.5) and ml to L (500 ml = 0.5). Never invent amounts.
+   For ADD, SELL and CREATE_ITEM return quantity and unit in the item's inventory base
+   unit. Copy the entire original quantity expression (count AND measure) into
+   quantity_words for each item separately. For liquids, a pipa/tin/dabba is 10 L.
+   For rice, sugar, lentils, flour/atta and salt, a katta/bori/bora is 50 kg.
+   A darjan/dozen is 12 count units. A pao/pav is 0.25 (teen pao = 0.75);
+   aadha/half = 0.5, sawa = 1.25, dedh = 1.5 and dhai = 2.5.
+   Convert grams to kg and ml to L (500 of either is 0.5 in its base unit).
+   Apply each factor once. Keep quantities separate from prices. Ask for clarification
+   when the spoken measure cannot be converted to the item's database unit.
 
 3. Strict Quantity Rule for Stock Updates:
    Use intent INVENTORY_UPDATE for single-item, multi-item, and mixed stock updates:
@@ -107,7 +300,7 @@ Strict Rules:
    - Each item's quantity must come from the transcript. Never use an inventory value, guess 1,
      borrow another item's quantity, or silently omit an incomplete or unknown item.
    - If items is empty or ANY ADD/SELL quantity is missing or <= 0, return INCOMPLETE_INPUT and ask for
-     the missing quantity in reply_local. If any item is unknown, ask for the item.
+     the missing quantity in reply_local. For unknown SELL or UPDATE_PRICE items ask for the item.
    - If an item's action is unclear, return INCOMPLETE_INPUT and ask whether to add or sell it.
 
 4. For stock updates, set sql_query = "" and metric = null.
@@ -142,7 +335,32 @@ Strict Rules:
 7. Conciseness & Non-Repetition:
    Write at most 1-2 short, direct sentences in reply_local. Never repeat the same item, number, or phrase twice."""
 
-LANG_MAP = {"hi": "hi", "ta": "ta", "mr": "mr", "bn": "bn", "te": "te", "en": "en"}
+SYSTEM_PROMPT += """
+
+Interpret commands in all Scheduled languages: Assamese, Bengali, Bodo, Dogri,
+Gujarati, Hindi, Kannada, Kashmiri, Konkani, Maithili, Malayalam, Manipuri (Meitei),
+Marathi, Nepali, Odia, Punjabi, Sanskrit, Santali, Sindhi, Tamil, Telugu and Urdu.
+Also handle English, Bhojpuri, Haryanvi, Rajasthani, Hinglish, Tanglish, Kanglish
+and other dialects or mixtures. Classify ADD, SELL, CREATE_ITEM, UPDATE_PRICE and
+ANALYTICS_QUERY by the meaning of each clause, including verbs absent from examples.
+Copy the affirmative verb phrase into action_words, never a bare quantity or noun.
+Use the transcript's language, register, mix and script for reply_local even if its
+voice uses a different language. Return its ISO 639-1 code when available
+(hi en ta te kn ml mr gu bn pa or as ur ne sd ks sa). For languages without one,
+use mr for Konkani and hi for Maithili, Bodo, Dogri, Manipuri, Santali and unlisted
+dialects without a code. Use hi/ta/kn for Hinglish/Tanglish/Kanglish respectively.
+Grocery aliases:
+""" + json.dumps(ITEM_ALIASES, ensure_ascii=False) + """
+Some examples of action verbs:
+""" + json.dumps(ACTION_VERBS, ensure_ascii=False, indent=2) + """
+Detect the language of the command even when it is romanized. Both "2 ಕೆಜಿ ಸಕ್ಕರೆ ಸೇರಿಸಿ"
+and "2 Keji sakkare serisi" are Kannada (kn), ADD sugar, quantity 2. ADD verbs increase
+stock and never increment units_sold. Never classify an item as SELL unless its own
+clause explicitly describes a sale, handoff to a customer, or stock deduction. Interpret din
+as an add verb in Bengali and taka in Marathi only when they function as commands. A noun and
+quantity alone are insufficient. Copy the full verbatim clause into source_clause for
+each stock action, including a shared verb when it governs several items. Interpret verbs
+in context: negated or hypothetical actions and questions about sales are not writes."""
 
 SILENCE_HALLUCINATIONS = {
     "", "you", "thank you", "thank you so much", "thank you very much",
@@ -174,17 +392,131 @@ def _price_stated(item: CommandItem, transcript: str) -> bool:
                 and re.search(r"(?<!\w)" + re.escape(words) + r"(?!\w)", transcript.casefold()))
 
 
-def execute_decision(decision: Decision, transcript: Optional[str] = None) -> ExecutionResult:
+NEW_ITEM_PROMPTS = {
+    "kn": "ಹೊಸ ವಸ್ತುವನ್ನು ಸೇರಿಸಲು ಪ್ರಮಾಣ, ಘಟಕ ಮತ್ತು ಮಾರಾಟದ ಬೆಲೆಯನ್ನು ತಿಳಿಸಿ.",
+    "hi": "Naya item add karne ke liye quantity, unit aur selling price batayein.",
+    "en": "To add the product, specify its quantity, unit and selling price per unit.",
+    "ta": "Pudhiya porulin alavu, alagu matrum virpanai vilaiyai sollungal.",
+    "mr": "Navin vastuche praman, ekak ani vikri kimmat sanga.",
+    "bn": "Notun ponner poriman, ekok o bikrir daam bolun.",
+    "te": "Kotta vastuvu parimanam, unit mariyu ammaka dhara cheppandi.",
+}
+
+
+def _cites_action(item: CommandItem, clause: str) -> bool:
+    words = (item.action_words or "").strip().casefold()
+    return bool(words and any(c.isalpha() for c in words)
+                and words != (item.source_name or item.item_name or "").casefold()
+                and re.search(r"(?<!\w)" + re.escape(words) + r"(?!\w)", clause.casefold()))
+
+
+def _creation_stated(item: CommandItem, transcript: str, converted_phrase: str = "") -> bool:
+    """Check that the request to add and its amounts occur in the cited clause."""
+    clause = (item.source_clause or transcript).strip().casefold()
+    if not clause or clause not in transcript.casefold():
+        return False
+    if not _cites_action(item, clause) and not ADD_VERB.search(clause) and not re.search(r"\b(add|stock|restock|create|register|include|introduce|received|jod\w*|daal\w*|shamil|serkk\w*|cherch\w*|jog|ghala)\b"
+                     r"|जोड़|जोड|डाल|शामिल|ऐड|एड|घाला|சேர்|చేర్చ|జోడించ|যোগ", clause):
+        return False
+    raw_name = (item.item_name or "").strip().lower().replace("_", " ")
+    canonical = ITEM_ALIASES.get(raw_name, raw_name.replace(" ", "_"))
+    names = [canonical.replace("_", " "), raw_name]
+    names.extend(alias for alias, name in ITEM_ALIASES.items() if name == canonical)
+    if item.source_name:
+        names.append(item.source_name.strip().casefold())
+    if not any(n and re.search(r"(?<!\w)" + re.escape(n) + r"(?!\w)", clause) for n in names):
+        return False
+    if SELL_VERB.search(clause) or re.search(r"\b(no|not|never|don['’]t|sell|sold|bik|bech\w*|mat|nahi|if|how much|in stock)\b|मत\s|नहीं|बिक|बेच", clause):
+        return False
+    # Consume distinct mentions so one number cannot supply both the price and quantity.
+    if converted_phrase:
+        clause = clause.replace(converted_phrase, "", 1)
+    numbers = [Decimal(m.replace(",", "")) for m in re.findall(
+        r"[+-]?(?:\d+(?:,\d{2,3})*(?:\.\d+)?|\.\d+)", clause.replace("−", "-")
+    )]
+    for value, words, is_quantity in [(item.price_per_unit, item.price_words, False),
+                                      (item.quantity, item.quantity_words, True)]:
+        if value is None or (is_quantity and converted_phrase):
+            continue
+        amount = Decimal(str(value))
+        if amount in numbers:
+            numbers.remove(amount)
+        elif words and words.casefold() in clause and not any(c.isdigit() for c in words):
+            clause = clause.replace(words.casefold(), "", 1)
+        elif (is_quantity and amount * 1000 in numbers
+              and re.search(r"\b(grams?|g|gm|ml|millilit\w*)\b|ग्राम|मिलीलीटर", clause)):
+            numbers.remove(amount * 1000)
+        else:
+            return False
+    return True
+
+
+def _checked_sale(item: CommandItem, transcript: str, single: bool, lang: str) -> Optional[str]:
+    """Resolve a proposed sale against the verb governing this product."""
+    raw_name = (item.item_name or "").casefold()
+    canonical = ITEM_ALIASES.get(raw_name, raw_name)
+    names = [canonical.replace("_", " "), item.source_name or ""]
+    names.extend(alias for alias, name in ITEM_ALIASES.items() if name == canonical)
+    def mentions_item(text):
+        return any(n and re.search(r"(?<!\w)" + re.escape(n) + r"(?!\w)", text, re.I) for n in names)
+
+    clause = transcript if single else item.source_clause
+    if not clause:
+        clauses = re.split(r"[,;]|\b(?:and|aur|mattu|ಮತ್ತು)\b", transcript, flags=re.I)
+        matches = [part for part in clauses if mentions_item(part)]
+        clause = matches[0] if len(matches) == 1 else ""
+    if not clause or (not single and not mentions_item(clause)):
+        return None
+    if clause.casefold() not in transcript.casefold():
+        return None
+    if re.search(r"\b(not|never|don['’]t|if|mat|nahi|beda|illa|how much|how many)\b|ಬೇಡ|ಇಲ್ಲ|नहीं|मत\s", transcript, re.I):
+        return None
+    add = any(m.group().casefold() not in {"din", "taka"} or
+              (m.group().casefold(), lang) in {("din", "bn"), ("taka", "mr")}
+              for m in ADD_VERB.finditer(clause))
+    sell = bool(SELL_VERB.search(clause))
+    if sell and not add:
+        return "SELL"
+    if add and not sell:
+        return "ADD"
+    if not add and not sell and mentions_item(clause) and _cites_action(item, clause):
+        return "SELL"
+    return None
+
+
+def execute_decision(decision: Decision, transcript: Optional[str] = None,
+                     existing_items: Optional[list[str]] = None,
+                     inventory_units: Optional[dict[str, str]] = None) -> ExecutionResult:
     sql = decision.sql_query.strip().removesuffix(";").strip()
     is_update = decision.intent in {"INVENTORY_UPDATE", "ADD_INVENTORY", "SELL_ITEM"}
     if is_update:
+        existing = {name.casefold(): name for name in (get_existing_items() if existing_items is None else existing_items)}
+        conversions = []
         for item in decision.items:
+            phrase = ""
+            if transcript and item.action != "UPDATE_PRICE":
+                phrase = _normalize_stock_item(item, transcript, len(decision.items) == 1, inventory_units or {})
+                if phrase and item.quantity is None:
+                    decision.intent = "INCOMPLETE_INPUT"
+                    return ExecutionResult(grounded_reply=(
+                        f"Please specify the amount of {item.item_name} in {item.unit or 'inventory units'}."
+                    ))
+            conversions.append(phrase)
+            if item.action == "CREATE_ITEM" and (
+                item.quantity is None or not math.isfinite(item.quantity) or item.quantity <= 0
+                or (item.price_per_unit is not None and
+                    (not math.isfinite(item.price_per_unit) or item.price_per_unit <= 0))
+                or (transcript is not None and not _creation_stated(item, transcript, phrase))
+            ):
+                decision.intent = "INCOMPLETE_INPUT"
+                return ExecutionResult(grounded_reply=NEW_ITEM_PROMPTS.get(decision.detected_lang, NEW_ITEM_PROMPTS["en"]))
             if item.action == "UPDATE_PRICE" and (
                 item.new_price is None or not math.isfinite(item.new_price) or item.new_price <= 0
                 or (transcript is not None and not _price_stated(item, transcript))
             ):
                 decision.intent = "INCOMPLETE_INPUT"
                 prompts = {
+                    "kn": "ಹೊಸ ಮಾರಾಟದ ಬೆಲೆಯನ್ನು ರೂಪಾಯಿಗಳಲ್ಲಿ ತಿಳಿಸಿ",
                     "hi": "Naya bikri ka daam rupaye mein batayein",
                     "ta": "Pudhiya virpanai vilaiyai roobaayil sollungal",
                     "mr": "Navin vikri kimmat rupayant sanga",
@@ -192,7 +524,7 @@ def execute_decision(decision: Decision, transcript: Optional[str] = None) -> Ex
                     "te": "Kotta ammaka dhara rupayallo cheppandi",
                     "en": "Please specify the exact new selling price in rupees",
                 }
-                return ExecutionResult(grounded_reply=prompts[decision.detected_lang] + ".")
+                return ExecutionResult(grounded_reply=prompts.get(decision.detected_lang, prompts["en"]) + ".")
         invalid = [
             item for item in decision.items
             if item.action != "UPDATE_PRICE"
@@ -202,6 +534,7 @@ def execute_decision(decision: Decision, transcript: Optional[str] = None) -> Ex
             decision.intent = "INCOMPLETE_INPUT"
             decision.sql_query = ""
             prompts = {
+                "kn": "ದಯವಿಟ್ಟು ಸರಿಯಾದ ಪ್ರಮಾಣವನ್ನು ತಿಳಿಸಿ",
                 "hi": "Kripya sahi quantity batayein",
                 "ta": "Sariyana alavai sollungal",
                 "mr": "Krupaya yogya praman sanga",
@@ -210,7 +543,7 @@ def execute_decision(decision: Decision, transcript: Optional[str] = None) -> Ex
                 "en": "Please specify a positive quantity",
             }
             names = ", ".join(item.item_name.capitalize() for item in invalid if item.item_name)
-            prompt = prompts[decision.detected_lang]
+            prompt = prompts.get(decision.detected_lang, prompts["en"])
             return ExecutionResult(grounded_reply=f"{prompt} ({names})." if names else f"{prompt}.")
 
     if re.search(r"\b(DROP|DELETE|ALTER|INSERT|TRUNCATE)\b", decision.sql_query, re.I):
@@ -227,13 +560,20 @@ def execute_decision(decision: Decision, transcript: Optional[str] = None) -> Ex
             items = []
             legacy_action = {"ADD_INVENTORY": "ADD", "SELL_ITEM": "SELL"}.get(decision.intent)
             for item in decision.items:
-                name = ITEM_ALIASES.get((item.item_name or "").strip().lower())
-                if name not in ALLOWED_ITEMS:
+                raw_name = " ".join((item.item_name or "").lower().split())
+                canonical = ITEM_ALIASES.get(raw_name, raw_name.replace(" ", "_"))
+                name = existing.get(raw_name, existing.get(canonical, canonical))
+                if name.casefold() not in existing and not re.fullmatch(r"[a-z][a-z0-9]*(?:_[a-z0-9]+)*", name):
                     raise UnknownInventoryItem(item.item_name or "item")
                 action = item.action or legacy_action
+                if action == "SELL" and transcript is not None:
+                    action = _checked_sale(item, transcript, len(decision.items) == 1, decision.detected_lang)
+                    if action == "ADD" and decision.intent == "SELL_ITEM":
+                        decision.intent = "INVENTORY_UPDATE"
                 if action is None:
                     decision.intent = "INCOMPLETE_INPUT"
                     prompts = {
+                        "kn": "ಸೇರಿಸಬೇಕೇ ಅಥವಾ ಮಾರಾಟ ಮಾಡಬೇಕೇ",
                         "hi": "Jodna hai ya bechna hai",
                         "ta": "Serkkava allathu virkava",
                         "mr": "Jodayche ki vikayche",
@@ -241,11 +581,17 @@ def execute_decision(decision: Decision, transcript: Optional[str] = None) -> Ex
                         "te": "Cherchala leka ammala",
                         "en": "Add or sell",
                     }
-                    return ExecutionResult(grounded_reply=f"{prompts[decision.detected_lang]} ({name.capitalize()})?")
-                items.append((name, item.new_price if action == "UPDATE_PRICE" else item.quantity, action))
+                    return ExecutionResult(grounded_reply=f"{prompts.get(decision.detected_lang, prompts['en'])} ({name.capitalize()})?")
+                value = item.new_price if action == "UPDATE_PRICE" else item.quantity
+                items.append(InventoryWrite(name, value, action, item.unit, item.price_per_unit))
             changes = update_inventory_batch(items)
+        except IncompleteNewItem:
+            decision.intent = "INCOMPLETE_INPUT"
+            return ExecutionResult(grounded_reply=NEW_ITEM_PROMPTS.get(decision.detected_lang, NEW_ITEM_PROMPTS["en"]))
         except UnknownInventoryItem as exc:
             decision.intent = "INCOMPLETE_INPUT"
+            if decision.detected_lang == "kn":
+                return ExecutionResult(grounded_reply=f"ದಾಸ್ತಾನಿನಲ್ಲಿ '{exc}' ಲಭ್ಯವಿಲ್ಲ. ವಸ್ತುವಿನ ಹೆಸರು ತಿಳಿಸಿ.")
             reply = (
                 f"Item '{exc}' inventory mein uplabdh nahi hai. Kripya sahi grocery item batayein."
                 if decision.detected_lang == "hi"
@@ -254,6 +600,7 @@ def execute_decision(decision: Decision, transcript: Optional[str] = None) -> Ex
             return ExecutionResult(grounded_reply=reply)
 
         introductions = {
+            "kn": "ದಾಸ್ತಾನು ನವೀಕರಿಸಲಾಗಿದೆ",
             "hi": "Stock update ho gaya",
             "ta": "Irupu pudhuppikkappattadhu",
             "mr": "Satha adyatan zala",
@@ -262,26 +609,43 @@ def execute_decision(decision: Decision, transcript: Optional[str] = None) -> Ex
             "en": "Stock updated",
         }
         price_labels = {
+            "kn": "ಬೆಲೆ",
             "hi": "ka daam", "ta": "vilai", "mr": "chi kimmat", "bn": "er daam",
             "te": "dhara", "en": "price",
         }
         parts = []
-        for (name, before, after, unit), (_, _, action) in zip(changes, items):
+        for change, write, phrase in zip(changes, items, conversions):
+            name = change.item_name.replace("_", " ")
+            before, after, unit = change.before, change.after, change.unit
+            action = write.action
+            total = format(Decimal(str(after)).normalize(), "f")
+            detail = f" ({phrase}), total stock {total} {unit}" if phrase else ""
+            if isinstance(change, ProductChange):
+                amount = format((Decimal(str(after)) - Decimal(str(before))).normalize(), "f")
+                price = format(Decimal(str(change.price)).normalize(), "f")
+                new_label = {"kn": "ಹೊಸ ವಸ್ತು", "hi": "Naya item", "ta": "Pudhiya porul", "mr": "Navin vastu",
+                             "bn": "Notun ponno", "te": "Kotta vastuvu", "en": "New item"}
+                label = new_label.get(decision.detected_lang, new_label["en"]) + " " if change.created else ""
+                if change.created and len(changes) == 1 and decision.detected_lang == "hi":
+                    return ExecutionResult(grounded_reply=f"{label}{name.capitalize()} add ho gaya: {amount} {unit} @ ₹{price}/{unit}{detail}.")
+                parts.append(f"{label}{name.capitalize()} (+{amount} {unit} @ ₹{price}/{unit}){detail}")
+                continue
             if action == "UPDATE_PRICE":
                 old = format(Decimal(str(before)).normalize(), "f")
                 new = format(Decimal(str(after)).normalize(), "f")
                 per_unit = "packet" if unit == "packets" else unit
-                parts.append(f"{name.capitalize()} {price_labels[decision.detected_lang]} (₹{old} → ₹{new}/{per_unit})")
+                parts.append(f"{name.capitalize()} {price_labels.get(decision.detected_lang, price_labels['en'])} (₹{old} → ₹{new}/{per_unit})")
                 continue
             delta = Decimal(str(after)) - Decimal(str(before))
             amount = format(delta.normalize(), "+f") if delta else "0"
-            parts.append(f"{name.capitalize()} ({amount} {unit})")
-        if any(action == "UPDATE_PRICE" for _, _, action in items):
+            parts.append(f"{name.capitalize()} ({amount} {unit}){detail}")
+        if any(write.action == "UPDATE_PRICE" for write in items):
             introductions = {
+                "kn": "ನವೀಕರಿಸಲಾಗಿದೆ",
                 "hi": "Update ho gaya", "ta": "Pudhuppikkappattadhu", "mr": "Badal kela",
                 "bn": "Bodol hoyeche", "te": "Mārpu chēsāmu", "en": "Updated",
             }
-        return ExecutionResult(grounded_reply=f"{introductions[decision.detected_lang]}: {', '.join(parts)}.")
+        return ExecutionResult(grounded_reply=f"{introductions.get(decision.detected_lang, introductions['en'])}: {', '.join(parts)}.")
 
     # ---------------------------------------------------------
     # Layer 4: Deterministic Grounding (ANALYTICS_QUERY)
@@ -342,6 +706,8 @@ def format_analytics_reply(
       3. Compose a 1-2 sentence reply in detected_lang with exact numbers.
     """
     if not chart:
+        if detected_lang == "kn":
+            return "ದಾಸ್ತಾನಿನ ಮಾಹಿತಿ ಲಭ್ಯವಿಲ್ಲ."
         return "Inventory mein data uplabdh nahi hai." if detected_lang == "hi" else "No data available in inventory."
 
     sql_lower = sql_query.lower()
@@ -362,6 +728,17 @@ def format_analytics_reply(
 
     items_str = ", ".join(parts)
     lang = detected_lang
+
+    if lang == "kn":
+        if is_price:
+            intro = "ಕಡಿಮೆ ಬೆಲೆಯ ವಸ್ತುಗಳು" if asc_order else "ಹೆಚ್ಚು ಬೆಲೆಯ ವಸ್ತುಗಳು"
+        elif is_profit:
+            intro = "ಹೆಚ್ಚು ಆದಾಯ ತಂದ ವಸ್ತುಗಳು"
+        elif is_units_sold:
+            intro = "ಹೆಚ್ಚು ಮಾರಾಟವಾದ ವಸ್ತುಗಳು"
+        else:
+            intro = "ದಾಸ್ತಾನು"
+        return f"{intro}: {items_str}."
 
     # --- Hindi / Hinglish ---
     if lang == "hi":
@@ -460,8 +837,8 @@ def clean_transcript(text: str) -> str:
                     repeats = 1
                     while i + (repeats + 1) * k <= len(words):
                         next_chunk = words[i + repeats * k : i + (repeats + 1) * k]
-                        chunk_norm = [re.sub(r"[^\w]", "", w.lower()) for w in chunk]
-                        next_norm = [re.sub(r"[^\w]", "", w.lower()) for w in next_chunk]
+                        chunk_norm = [w.casefold().strip(".,!?।") for w in chunk]
+                        next_norm = [w.casefold().strip(".,!?।") for w in next_chunk]
                         if chunk_norm == next_norm and any(chunk_norm):
                             repeats += 1
                         else:
@@ -483,32 +860,17 @@ def clean_transcript(text: str) -> str:
 
 
 def generate_tts_base64(text: str, lang: str) -> str:
-    """Generate an MP3 of *text* via gTTS and return its base64 string.
-
-    Falls back through lang -> 'hi' -> 'en' if the requested language code
-    is rejected, and returns an empty string if TTS fails entirely so that
-    the calling endpoint never crashes.
-    """
+    """Try the mapped voice and then English, preserving text-only responses."""
     from gtts import gTTS
 
-    fallback_chain = []
-    mapped = LANG_MAP.get(lang, lang)
-    if mapped:
-        fallback_chain.append(mapped)
-    if "hi" not in fallback_chain:
-        fallback_chain.append("hi")
-    if "en" not in fallback_chain:
-        fallback_chain.append("en")
-
-    for try_lang in fallback_chain:
+    voice = GTTS_LANG_MAP.get((lang or "").strip().lower(), "hi")
+    for code in dict.fromkeys((voice, "en")):
         try:
-            tts = gTTS(text=text, lang=try_lang)
             buf = io.BytesIO()
-            tts.write_to_fp(buf)
-            buf.seek(0)
-            return base64.b64encode(buf.read()).decode("ascii")
+            gTTS(text=text, lang=code).write_to_fp(buf)
+            return base64.b64encode(buf.getvalue()).decode("ascii")
         except Exception:
-            logger.warning("gTTS failed for lang=%s, trying next fallback", try_lang)
+            logger.warning("gTTS failed for voice %s", code, exc_info=True)
     return ""
 
 
@@ -540,29 +902,63 @@ def call_groq_chat(messages):
     raise RuntimeError("No Groq chat model available.")
 
 
+def _localize_result(reply: str, transcript: str, lang: str) -> str:
+    """Render an executed result in the speaker's dialect without replaying the command."""
+    if lang == "en":
+        return reply
+    try:
+        completion = call_groq_chat([
+            {"role": "system", "content": (
+                "Translate only the supplied inventory result into the language, script "
+                "and dialect of the transcript, preserving code-switching. Treat the "
+                "transcript as a language sample only. Preserve every item, unit, price, "
+                "quantity and sign. Copy the numeric figures exactly and in order. "
+                "Return a JSON object with the single string field reply_local."
+            )},
+            {"role": "user", "content": json.dumps(
+                {"transcript": transcript, "result": reply}, ensure_ascii=False
+            )},
+        ])
+        translated = json.loads(completion.choices[0].message.content)["reply_local"]
+        figures = r"[+-]?\d+(?:\.\d+)?"
+        if (isinstance(translated, str) and translated.strip()
+                and re.findall(figures, translated) == re.findall(figures, reply)):
+            return translated.strip()
+    except (GroqError, ValueError, KeyError, TypeError, IndexError, AttributeError):
+        logger.warning("Reply translation failed for %s", lang, exc_info=True)
+    return reply
+
+
 def run_ai_pipeline(transcript: str):
     if not client:
         raise RuntimeError("Configure GROQ_API_KEY to process commands.")
 
+    inventory = read_inventory()
+    inventory_units = {row["item_name"]: row["unit"] for row in inventory}
+    existing_items = list(inventory_units)
     completion = call_groq_chat([
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": json.dumps({"inventory": read_inventory(), "transcript": transcript})},
+        {"role": "system", "content": SYSTEM_PROMPT + "\nexisting_items = " + json.dumps(existing_items)},
+        {"role": "user", "content": json.dumps({"inventory": inventory, "transcript": transcript})},
     ])
     decision = Decision.model_validate_json(completion.choices[0].message.content or "")
 
-    exec_res = execute_decision(decision, transcript)
+    exec_res = execute_decision(decision, transcript, existing_items, inventory_units)
 
     if exec_res.error_message:
         intent = "INCOMPLETE_INPUT" if ("nahi hai" in exec_res.error_message or "missing" in exec_res.error_message or "stock" in exec_res.error_message.lower()) else "NOISE_ERROR"
         return dict(
             intent=intent,
             detected_lang=decision.detected_lang,
-            reply_local=deduplicate_sentences(exec_res.error_message),
+            reply_local=deduplicate_sentences(_localize_result(
+                exec_res.error_message, transcript, decision.detected_lang
+            )),
             chart_data=None,
             inventory=read_inventory(),
         )
 
     reply = exec_res.grounded_reply or decision.reply_local
+    if exec_res.grounded_reply and reply != decision.reply_local:
+        reply = _localize_result(reply, transcript, decision.detected_lang)
     reply = deduplicate_sentences(reply)
     chart_clean = [{"label": r["label"], "value": r["value"]} for r in exec_res.chart] if exec_res.chart else None
 
@@ -584,28 +980,12 @@ def process_voice_command(audio_bytes: bytes, filename: str, content_type: str) 
     # ---------------------------------------------------------
     # Layer 1: Whisper Confidence Gate & Deduplication
     # ---------------------------------------------------------
-    whisper_kwargs = dict(
+    transcription = client.audio.transcriptions.create(
         model="whisper-large-v3",
         file=(filename, audio_bytes, content_type),
         response_format="verbose_json",
         temperature=0.0,
-        prompt=(
-            "Hindi, Hinglish, and English Kirana store voice command: "
-            "konsa item sabse mehnga hai, sabse sasta saman, "
-            "10 packet mattha add karo, 5 kilo cheeni, 2 liter doodh bik gaya, "
-            "chawal, dal, tel, namak, chai patti."
-        ),
     )
-
-    try:
-        transcription = client.audio.transcriptions.create(
-            condition_on_previous_text=False,
-            **whisper_kwargs,
-        )
-    except (TypeError, GroqError):
-        transcription = client.audio.transcriptions.create(
-            **whisper_kwargs,
-        )
 
     if isinstance(transcription, dict):
         raw_transcript = transcription.get("text", "").strip()
